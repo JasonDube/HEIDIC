@@ -1,0 +1,43 @@
+// Simple GLFW Window Test for EDEN ENGINE
+
+fn main(): void {
+    print("=== EDEN ENGINE Window Test ===\n");
+    print("Initializing GLFW...\n");
+
+    let init_result: i32 = glfwInit();
+    if init_result == 0 {
+        print("Failed to initialize GLFW!\n");
+        return;
+    }
+
+    print("GLFW initialized.\n");
+    print("Creating window...\n");
+
+    // Configure for Vulkan (GLFW_CLIENT_API = 0x00022001, GLFW_NO_API = 0)
+    // Using decimal: 0x00022001 = 139265
+    glfwWindowHint(139265, 0);
+
+    let window: GLFWwindow = glfwCreateWindow(800, 600, "EDEN ENGINE Window", 0, 0);
+    if window == 0 {
+        print("Failed to create window!\n");
+        glfwTerminate();
+        return;
+    }
+
+    print("Window created successfully!\n");
+    print("Press ESC to close the window.\n");
+
+    while glfwWindowShouldClose(window) == 0 {
+        glfwPollEvents();
+
+        if glfwGetKey(window, 256) == 1 {  // GLFW_KEY_ESCAPE = 256, GLFW_PRESS = 1
+            glfwSetWindowShouldClose(window, 1);
+        }
+    }
+
+    print("Closing window...\n");
+    glfwDestroyWindow(window);
+    glfwTerminate();
+    print("Test completed!\n");
+}
+

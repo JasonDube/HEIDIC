@@ -1,0 +1,64 @@
+// Simple HEIDIC v2 example - Hello World
+
+fn main(): void {
+    print("Hello, HEIDIC v2!\n");
+    
+    // Math operations
+    let x: f32 = 10.0;
+    let y: f32 = 20.0;
+    let result: f32 = x + y;
+    print("10.0 + 20.0 = ");
+    print(result);
+    print("\n");
+    
+    // Variables and calculations
+    let health: f32 = 100.0;
+    let damage: f32 = 25.0;
+    let new_health: f32 = health - damage;
+    print("Health: ");
+    print(health);
+    print(" - Damage: ");
+    print(damage);
+    print(" = New Health: ");
+    print(new_health);
+    print("\n");
+    
+    // Conditionals
+    if new_health > 0.0 {
+        print("Player is alive!\n");
+    } else {
+        print("Player is dead!\n");
+    }
+    
+    // Loops
+    print("Counting from 1 to 5:\n");
+    let counter: i32 = 1;
+    while counter <= 5 {
+        print("  Count: ");
+        print(counter);
+        print("\n");
+        counter = counter + 1;
+    }
+    
+    // Function calls
+    let sum: f32 = add(15.0, 25.0);
+    print("add(15.0, 25.0) = ");
+    print(sum);
+    print("\n");
+    
+    let product: f32 = multiply(3.0, 7.0);
+    print("multiply(3.0, 7.0) = ");
+    print(product);
+    print("\n");
+    
+    print("Program complete!\n");
+}
+
+fn add(a: f32, b: f32): f32 {
+    return a + b;
+}
+
+fn multiply(a: f32, b: f32): f32 {
+    return a * b;
+}
+
