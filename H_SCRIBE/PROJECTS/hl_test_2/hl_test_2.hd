@@ -13,7 +13,7 @@ extern fn heidic_sleep_ms(milliseconds: i32): void;
 system(game_state) {
     fn get_rotation_speed(): f32 {
         // Try changing this value while the game is running and use Hotload!
-        let rotation_speed: f32 = 3.0;
+        let rotation_speed: f32 = 13.0;
         return rotation_speed;
     }
 }

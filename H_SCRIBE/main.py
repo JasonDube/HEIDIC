@@ -84,7 +84,9 @@ MENU_BUTTONS = [
     ("↓", "Save (Ctrl+S)", "save"),
     (">", "Run", "run"),
     ("▶", "Hotload", "hotload"),
-    ("C++", "Toggle C++ View", "cpp"),
+    ("◉", "Compile Shaders", "compile_shaders"),
+    ("[S]", "Load Shader", "load_shader"),
+    ("C++", "Toggle View", "cpp"),  # Cycles HD -> C++ -> SD -> HD
     ("R", "Reload", "reload"),
     ("X", "Quit (Esc)", "quit"),
 ]
@@ -155,13 +157,21 @@ class Editor:
         self._log_h_drag_offset = 0
         self.log_copy_btn_rect = pygame.Rect(MARGIN, (LOG_HEADER_HEIGHT - 22) // 2, LOG_COPY_BTN_WIDTH, 22)
         self.menu_hovered_action = None  # For tooltip display
-        self.viewing_hd = True  # True = viewing .hd, False = viewing .cpp
-        self.original_hd_path = path  # Store original .hd path
+        self.view_mode = "hd"  # "hd", "cpp", or "shader"
+        self.viewing_hd = True  # Deprecated: kept for compatibility, use view_mode instead
+        self.current_shader_path = None  # Path to currently loaded shader
+        self.original_hd_path = path if path and path.endswith(".hd") else path  # Store original .hd path
+        # Initialize view_mode based on path
+        if not path or not path.endswith(".hd"):
+            self.view_mode = "hd"
+            self.viewing_hd = True
         
         # File watching for auto hotload
         self.file_observer = None
         self.auto_hotload_enabled = True  # Enable auto hotload by default
         self.last_hotload_time = 0  # Track last hotload time to avoid rapid-fire reloads
+        self._building = False  # Flag to prevent auto-hotload during build
+        self._just_built = False  # Flag to prevent auto-hotload immediately after build
         self._setup_file_watcher()
         self.keywords = {
             "fn",
@@ -233,15 +243,22 @@ class Editor:
         self.terminal_vscroll = max_scroll
 
     def save(self):
-        # Always save to the original .hd file, not the .cpp view
-        save_path = self.original_hd_path
+        # Save to current file (HD, C++, or shader)
+        if self.view_mode == "shader" and self.current_shader_path:
+            save_path = self.current_shader_path
+        elif self.view_mode == "cpp" and not self.viewing_hd:
+            save_path = self.path  # Save to .cpp file if in C++ view
+        else:
+            save_path = self.original_hd_path  # Default to .hd file
+        
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         with open(save_path, "w", encoding="utf-8") as f:
             f.write("\n".join(self.lines))
-        self.status = f"Saved {save_path}"
+        self.status = f"Saved {os.path.basename(save_path)}"
         
-        # Auto hotload if enabled and we have hot systems
-        if self.auto_hotload_enabled and self.has_hot_systems():
+        # Auto hotload if enabled and we have hot systems (only for .hd files)
+        # Skip auto-hotload if we're currently building or just finished building
+        if self.view_mode == "hd" and self.auto_hotload_enabled and self.has_hot_systems() and not self._building and not self._just_built:
             # Debounce: only hotload if it's been at least 2 seconds since last hotload
             current_time = time.time()
             if current_time - self.last_hotload_time > 2.0:
@@ -277,8 +294,14 @@ class Editor:
                 def on_modified(self, event):
                     if event.is_directory:
                         return
+                    # Ignore DLL files - they get rebuilt during build, don't trigger hotload
+                    if event.src_path.endswith(".dll") or event.src_path.endswith(".dll.new"):
+                        return
                     # Only handle .hd file changes
                     if event.src_path.endswith(".hd") and os.path.abspath(event.src_path) == os.path.abspath(self.editor.original_hd_path):
+                        # Skip if we're building or just finished building
+                        if self.editor._building or self.editor._just_built:
+                            return
                         # Debounce: avoid multiple triggers from same save
                         current_time = time.time()
                         if current_time - self.last_modified > 1.0:
@@ -319,14 +342,15 @@ class Editor:
         return os.path.exists(cpp_path)
     
     def has_hot_systems(self):
-        """Check if the current HEIDIC file has @hot systems."""
-        if not self.viewing_hd or not self.original_hd_path.endswith(".hd"):
+        """Check if the current HEIDIC file has @hot systems or @hot shaders."""
+        # Check the original HD file regardless of current view mode
+        if not self.original_hd_path or not self.original_hd_path.endswith(".hd"):
             return False
         try:
             with open(self.original_hd_path, "r", encoding="utf-8") as f:
                 content = f.read()
-                # Simple check for @hot annotation
-                return "@hot" in content or "@hot\n" in content or "@hot " in content
+                # Check for @hot annotation (systems or shaders)
+                return "@hot" in content
         except:
             return False
     
@@ -346,39 +370,248 @@ class Editor:
         
         return dll_files
     
-    def toggle_cpp_view(self):
-        """Toggle between .hd and .cpp file views."""
-        if not self.cpp_file_exists():
-            return
+    def find_hot_shaders(self):
+        """Find all @hot shader declarations and return their paths."""
+        # Check the original HD file regardless of current view mode
+        if not self.original_hd_path or not self.original_hd_path.endswith(".hd"):
+            return []
         
-        if self.viewing_hd:
-            # Switch to .cpp
-            cpp_path = self.original_hd_path.replace(".hd", ".cpp")
-            if os.path.exists(cpp_path):
-                self.path = cpp_path
-                self.lines = self._load_file(cpp_path)
+        try:
+            with open(self.original_hd_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            
+            # Find @hot shader declarations
+            # Pattern: @hot shader (vertex|fragment|compute|...) "path"
+            import re
+            pattern = r'@hot\s+shader\s+\w+\s+"([^"]+)"'
+            matches = re.findall(pattern, content)
+            
+            shader_paths = []
+            project_dir = os.path.dirname(self.original_hd_path)
+            for match in matches:
+                shader_path = match
+                # If path is relative, resolve it relative to project directory
+                if not os.path.isabs(shader_path):
+                    shader_path = os.path.join(project_dir, shader_path)
+                # Normalize path
+                shader_path = os.path.normpath(shader_path)
+                if os.path.exists(shader_path) and shader_path.endswith(('.glsl', '.vert', '.frag', '.comp')):
+                    shader_paths.append(shader_path)
+            
+            return shader_paths
+        except Exception as e:
+            self.log_lines.append(f"WARNING: Error finding hot shaders: {e}")
+            return []
+    
+    def find_shaders_in_project(self):
+        """Find all shader files (.vert, .frag, .glsl, .comp) in the project directory."""
+        if not self.original_hd_path.endswith(".hd"):
+            return []
+        
+        project_dir = os.path.dirname(self.original_hd_path)
+        shader_files = []
+        
+        # Look for shader files recursively in project directory
+        shader_extensions = ['.vert', '.frag', '.glsl', '.comp', '.geom', '.tesc', '.tese']
+        
+        for root, dirs, files in os.walk(project_dir):
+            for file in files:
+                if any(file.endswith(ext) for ext in shader_extensions):
+                    shader_path = os.path.join(root, file)
+                    # Make path relative to project directory
+                    rel_path = os.path.relpath(shader_path, project_dir)
+                    shader_files.append((rel_path, shader_path))
+        
+        return shader_files
+    
+    def has_shaders(self):
+        """Check if the project has any shader files."""
+        return len(self.find_shaders_in_project()) > 0
+    
+    def toggle_view(self):
+        """Cycle through view modes: HD -> C++ -> SD -> HD"""
+        # Cycle: hd -> cpp -> shader -> hd
+        if self.view_mode == "hd":
+            # Try to switch to C++
+            if self.cpp_file_exists():
+                cpp_path = self.original_hd_path.replace(".hd", ".cpp")
+                if os.path.exists(cpp_path):
+                    self.view_mode = "cpp"
+                    self.viewing_hd = False
+                    self.path = cpp_path
+                    self.lines = self._load_file(cpp_path)
+                    self.current_shader_path = None
+                    self._reset_editor_state()
+                    self.status = f"Viewing C++: {cpp_path}"
+                    return
+            # If no C++ file, try shader mode
+            if self.has_shaders():
+                self.view_mode = "shader"
                 self.viewing_hd = False
-                self.cursor_x = 0
-                self.cursor_y = 0
-                self.scroll = 0
-                self.hscroll = 0
+                # Clear compiler output when switching to shader mode
                 self.log_lines = []
                 self.log_vscroll = 0
                 self.log_hscroll = 0
-                self.status = f"Viewing C++: {cpp_path}"
-        else:
-            # Switch back to .hd
+                # Load first shader by default
+                shaders = self.find_shaders_in_project()
+                if shaders:
+                    rel_path, full_path = shaders[0]
+                    self.current_shader_path = full_path
+                    self.path = full_path
+                    self.lines = self._load_file(full_path)
+                    self._reset_editor_state()
+                    self.log_lines = []  # Clear log again after reset
+                    self.status = f"Viewing Shader: {rel_path}"
+                    return
+        elif self.view_mode == "cpp":
+            # Try to switch to shader mode
+            if self.has_shaders():
+                self.view_mode = "shader"
+                self.viewing_hd = False
+                # Clear compiler output when switching to shader mode
+                self.log_lines = []
+                self.log_vscroll = 0
+                self.log_hscroll = 0
+                shaders = self.find_shaders_in_project()
+                if shaders:
+                    rel_path, full_path = shaders[0]
+                    self.current_shader_path = full_path
+                    self.path = full_path
+                    self.lines = self._load_file(full_path)
+                    self._reset_editor_state()
+                    self.log_lines = []  # Clear log again after reset
+                    self.status = f"Viewing Shader: {rel_path}"
+                    return
+            # No shaders, go back to HD
+            self.view_mode = "hd"
+            self.viewing_hd = True
             self.path = self.original_hd_path
             self.lines = self._load_file(self.original_hd_path)
+            self.current_shader_path = None
+            self._reset_editor_state()
+            self.status = f"Viewing HEIDIC: {self.original_hd_path}"
+        elif self.view_mode == "shader":
+            # Go back to HD
+            self.view_mode = "hd"
             self.viewing_hd = True
-            self.cursor_x = 0
-            self.cursor_y = 0
-            self.scroll = 0
-            self.hscroll = 0
+            self.path = self.original_hd_path
+            self.lines = self._load_file(self.original_hd_path)
+            self.current_shader_path = None
+            self._reset_editor_state()
+            self.status = f"Viewing HEIDIC: {self.original_hd_path}"
+    
+    def _reset_editor_state(self):
+        """Reset editor cursor and scroll state."""
+        self.cursor_x = 0
+        self.cursor_y = 0
+        self.scroll = 0
+        self.hscroll = 0
+        self.log_lines = []
+        self.log_vscroll = 0
+        self.log_hscroll = 0
+    
+    def toggle_cpp_view(self):
+        """Legacy method - redirects to toggle_view."""
+        self.toggle_view()
+    
+    def load_shader(self, shader_path):
+        """Load a shader file into the editor."""
+        if os.path.exists(shader_path):
+            self.view_mode = "shader"
+            self.viewing_hd = False
+            # Clear compiler output when loading shader
             self.log_lines = []
             self.log_vscroll = 0
             self.log_hscroll = 0
-            self.status = f"Viewing HEIDIC: {self.original_hd_path}"
+            self.current_shader_path = shader_path
+            self.path = shader_path
+            self.lines = self._load_file(shader_path)
+            self._reset_editor_state()
+            self.log_lines = []  # Clear log again after reset
+            rel_path = os.path.relpath(shader_path, os.path.dirname(self.original_hd_path))
+            self.status = f"Viewing Shader: {rel_path}"
+            return True
+        return False
+    
+    def compile_shaders_only(self):
+        """Compile all shaders in the project without building the full project."""
+        if not self.original_hd_path.endswith(".hd"):
+            self.status = "No HEIDIC project loaded"
+            return
+        
+        project_dir = os.path.dirname(self.original_hd_path)
+        shaders = self.find_shaders_in_project()
+        
+        if not shaders:
+            self.status = "No shaders found in project"
+            return
+        
+        self.status = "Compiling shaders..."
+        pygame.display.flip()
+        
+        # Find glslc
+        glslc_found = False
+        glslc_path = None
+        
+        vulkan_sdk = os.environ.get("VULKAN_SDK")
+        if vulkan_sdk:
+            glslc_path = os.path.join(vulkan_sdk, "bin", "glslc.exe")
+            if os.path.exists(glslc_path):
+                glslc_found = True
+        
+        if not glslc_found:
+            import shutil
+            glslc_path = shutil.which("glslc")
+            if glslc_path:
+                glslc_found = True
+        
+        if not glslc_found:
+            self.status = "ERROR: glslc not found"
+            self.log_lines.append("ERROR: glslc not found. Install Vulkan SDK or ensure glslc is in PATH.")
+            return
+        
+        compiled_count = 0
+        for rel_path, shader_path in shaders:
+            # Determine output path (.spv) - keep extension to avoid conflicts
+            if shader_path.endswith('.glsl'):
+                spv_path = shader_path[:-5] + '.spv'
+            elif shader_path.endswith('.vert'):
+                spv_path = shader_path + '.spv'  # my_shader.vert.spv
+            elif shader_path.endswith('.frag'):
+                spv_path = shader_path + '.spv'  # my_shader.frag.spv
+            elif shader_path.endswith('.comp'):
+                spv_path = shader_path + '.spv'  # my_shader.comp.spv
+            else:
+                spv_path = shader_path + '.spv'
+            
+            # Determine shader stage
+            stage_flag = None
+            if shader_path.endswith('.comp'):
+                stage_flag = "-fshader-stage=compute"
+            elif shader_path.endswith('.vert'):
+                stage_flag = "-fshader-stage=vertex"
+            elif shader_path.endswith('.frag'):
+                stage_flag = "-fshader-stage=fragment"
+            elif shader_path.endswith('.geom'):
+                stage_flag = "-fshader-stage=geometry"
+            
+            # Compile shader
+            compile_cmd = [glslc_path]
+            if stage_flag:
+                compile_cmd.append(stage_flag)
+            compile_cmd.extend([shader_path, "-o", spv_path])
+            
+            result = self._run_step(f"CompileShader({os.path.basename(shader_path)})", compile_cmd)
+            if result:
+                compiled_count += 1
+                self.log_lines.append(f"Compiled: {rel_path} -> {os.path.basename(spv_path)}")
+            else:
+                self.log_lines.append(f"ERROR: Failed to compile {rel_path}")
+        
+        if compiled_count > 0:
+            self.status = f"Compiled {compiled_count} shader(s)"
+        else:
+            self.status = "Shader compilation failed"
 
     def handle_key(self, event):
         if event.key == pygame.K_s and pygame.key.get_mods() & pygame.KMOD_CTRL:
@@ -567,6 +800,73 @@ class Editor:
             "max_scroll": max_scroll,
         }
 
+    def _syntax_tokens_glsl(self, line):
+        """Simple syntax highlighter for GLSL shaders."""
+        tokens = []
+        i = 0
+        n = len(line)
+        in_string = False
+        current = ""
+        glsl_keywords = {"layout", "in", "out", "uniform", "vec2", "vec3", "vec4", "mat3", "mat4", 
+                         "float", "int", "void", "if", "else", "for", "while", "return", "sampler2D",
+                         "gl_Position", "gl_FragColor", "main", "version"}
+        while i < n:
+            ch = line[i]
+            nxt = line[i + 1] if i + 1 < n else ""
+            # Comment start
+            if not in_string and ch == "/" and nxt == "/":
+                if current:
+                    tokens.append((current, None))
+                    current = ""
+                tokens.append((line[i:], COLOR_COMMENT))
+                return tokens
+            # String literal
+            if ch == '"':
+                if current:
+                    tokens.append((current, None))
+                    current = ""
+                j = i + 1
+                while j < n and line[j] != '"':
+                    if line[j] == "\\" and j + 1 < n:
+                        j += 2
+                    else:
+                        j += 1
+                # include closing quote if present
+                segment = line[i : min(j + 1, n)]
+                tokens.append((segment, COLOR_STRING))
+                i = j + 1
+                continue
+            current += ch
+            i += 1
+        if current:
+            tokens.append((current, None))
+
+        # Post-process plain tokens for GLSL keywords/types/numbers
+        colored = []
+        word_regex = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+        num_regex = re.compile(r"^(\d+(\.\d+)?|0x[0-9A-Fa-f]+)$")
+        for text, color in tokens:
+            if color is not None:
+                colored.append((text, color))
+            else:
+                # Check for keywords, numbers, etc.
+                parts = word_regex.findall(text)
+                last_pos = 0
+                for word in parts:
+                    pos = text.find(word, last_pos)
+                    if pos > last_pos:
+                        colored.append((text[last_pos:pos], None))
+                    if word in glsl_keywords:
+                        colored.append((word, COLOR_KEYWORD))
+                    elif num_regex.match(word):
+                        colored.append((word, COLOR_NUMBER))
+                    else:
+                        colored.append((word, None))
+                    last_pos = pos + len(word)
+                if last_pos < len(text):
+                    colored.append((text[last_pos:], None))
+        return colored
+    
     def _syntax_tokens(self, line):
         """Very simple syntax highlighter for HEIDIC-like syntax."""
         tokens = []
@@ -662,13 +962,23 @@ class Editor:
         # Draw icon buttons
         icon_font = pygame.font.SysFont("Consolas", 18)  # Slightly larger for icons
         cpp_exists = self.cpp_file_exists()
+        has_project = self.original_hd_path and self.original_hd_path.endswith(".hd") and os.path.exists(self.original_hd_path)
+        has_shaders = self.has_shaders() if has_project else False
+        
         for rect, icon_char, tooltip, action in self.menu_hitboxes:
             # Check if button should be disabled
             is_disabled = False
-            if action == "cpp" and not cpp_exists:
-                is_disabled = True
+            if action == "cpp":
+                # Disable toggle button if no project loaded OR (no C++ file AND no shaders)
+                is_disabled = not has_project or (not cpp_exists and not has_shaders)
             elif action == "hotload" and not self.has_hot_systems():
                 is_disabled = True
+            elif action == "load_shader":
+                # Disable if no project or no shaders
+                is_disabled = not (has_project and has_shaders)
+            elif action == "compile_shaders":
+                # Disable if no project or no shaders
+                is_disabled = not (has_project and has_shaders)
             
             # Button background (with hover effect)
             if is_disabled:
@@ -708,9 +1018,27 @@ class Editor:
                 arrow_color = (255, 80, 80) if not is_disabled else (150, 150, 150)
                 points = [(center_x - 6, center_y - 6), (center_x - 6, center_y + 6), (center_x + 6, center_y)]
                 pygame.draw.polygon(editor_surface, arrow_color, points)
+            elif action == "compile_shaders":
+                # Blue arrow for shader compilation
+                arrow_color = (80, 120, 255) if not is_disabled else (150, 150, 150)
+                points = [(center_x - 6, center_y - 6), (center_x - 6, center_y + 6), (center_x + 6, center_y)]
+                pygame.draw.polygon(editor_surface, arrow_color, points)
+            elif action == "load_shader":
+                # Shader icon (simple "S")
+                shader_surf = icon_font.render("S", True, icon_color)
+                shader_x = center_x - shader_surf.get_width() // 2
+                shader_y = center_y - shader_surf.get_height() // 2
+                editor_surface.blit(shader_surf, (shader_x, shader_y))
             elif action == "cpp":
-                # Show current view: "HD" when viewing HEIDIC, "C++" when viewing C++
-                btn_text = "HD" if self.viewing_hd else "C++"
+                # Show current view: "HD", "C++", or "SD"
+                if self.view_mode == "hd":
+                    btn_text = "HD"
+                elif self.view_mode == "cpp":
+                    btn_text = "C++"
+                elif self.view_mode == "shader":
+                    btn_text = "SD"
+                else:
+                    btn_text = "HD"
                 cpp_surf = icon_font.render(btn_text, True, icon_color)
                 cpp_x = center_x - cpp_surf.get_width() // 2
                 cpp_y = center_y - cpp_surf.get_height() // 2
@@ -728,9 +1056,16 @@ class Editor:
         if self.menu_hovered_action:
             for rect, icon_char, tooltip, action in self.menu_hitboxes:
                 if action == self.menu_hovered_action:
-                    # Dynamic tooltip for C++ button
+                    # Dynamic tooltip for view toggle button
                     if action == "cpp":
-                        tooltip_text = "View C++" if self.viewing_hd else "View HEIDIC"
+                        if self.view_mode == "hd":
+                            tooltip_text = "View C++"
+                        elif self.view_mode == "cpp":
+                            tooltip_text = "View Shader"
+                        elif self.view_mode == "shader":
+                            tooltip_text = "View HEIDIC"
+                        else:
+                            tooltip_text = "Toggle View"
                     else:
                         tooltip_text = tooltip
                     tooltip_surf = self.font.render(tooltip_text, True, (240, 240, 240))
@@ -769,7 +1104,10 @@ class Editor:
                 ),
             )
             # Syntax-colored text (only for .hd files)
-            if self.viewing_hd:
+            if self.view_mode == "shader":
+                # GLSL syntax highlighting (simple)
+                tokens = self._syntax_tokens_glsl(self.lines[idx])
+            elif self.view_mode == "hd":
                 tokens = self._syntax_tokens(self.lines[idx])
             else:
                 tokens = [(self.lines[idx], None)]  # No syntax coloring for C++
@@ -981,31 +1319,39 @@ class Editor:
 
     def run_commands(self):
         """Compile -> build -> run pipeline with status updates."""
-        self.save()
-        self.status = "Compiling..."
-        pygame.display.flip()
-        hd_path = os.path.abspath(self.original_hd_path)
-        cpp_path = hd_path.replace(".hd", ".cpp")
+        # Set building flag to prevent auto-hotload during build
+        self._building = True
+        try:
+            self.save()
+            self.status = "Compiling..."
+            pygame.display.flip()
+            hd_path = os.path.abspath(self.original_hd_path)
+            cpp_path = hd_path.replace(".hd", ".cpp")
 
-        def fmt_cmd(cmd):
-            return [p.format(file=hd_path, cpp=cpp_path) for p in cmd]
+            def fmt_cmd(cmd):
+                return [p.format(file=hd_path, cpp=cpp_path) for p in cmd]
 
-        # Transpile timing
-        transpile_start = time.time()
-        result = self._run_step("Compile", fmt_cmd(CMD_COMPILE))
-        transpile_time = (time.time() - transpile_start) * 1000  # Convert to ms
-        
-        if result:
-            # Build timing
-            build_start = time.time()
-            self._do_build(hd_path, cpp_path)
-            build_time = time.time() - build_start
-            result = True  # Assume success for now (errors are in log)
+            # Transpile timing
+            transpile_start = time.time()
+            result = self._run_step("Compile", fmt_cmd(CMD_COMPILE))
+            transpile_time = (time.time() - transpile_start) * 1000  # Convert to ms
+            
+            # Initialize variables to avoid UnboundLocalError
+            shader_compile_time = 0.0
+            build_time = 0.0
+            if result:
+                # Build timing
+                build_start = time.time()
+                shader_compile_time = self._do_build(hd_path, cpp_path)
+                build_time = time.time() - build_start
+                result = True  # Assume success for now (errors are in log)
             
             # Display timing info in terminal
             self._add_terminal_line("")
             self._add_terminal_line("=== Build Summary ===")
             self._add_terminal_line(f"Transpile time: {transpile_time:.2f} ms")
+            if shader_compile_time > 0:
+                self._add_terminal_line(f"Shader compilation time: {shader_compile_time:.2f} seconds")
             self._add_terminal_line(f"Compile + Link time: {build_time:.2f} seconds")
             self._add_terminal_line("")
             
@@ -1046,12 +1392,107 @@ class Editor:
                         proc.wait()
                     except Exception as e:
                         self._add_terminal_line(f"Error running program: {e}")
-                import threading
+                # threading is already imported at module level (line 22)
                 thread = threading.Thread(target=run_with_output, daemon=True)
                 thread.start()
             elif CMD_RUN:
                 self.log_lines.append("ERROR: Executable not found. Build may have failed.")
                 self.status = "Build failed - cannot run"
+        finally:
+            # Reset building flag after build completes
+            self._building = False
+            # Set just_built flag to prevent immediate auto-hotload
+            self._just_built = True
+            # Clear just_built flag after 5 seconds (enough time for file watcher to stabilize)
+            def clear_just_built():
+                time.sleep(5.0)
+                self._just_built = False
+            # threading is already imported at module level (line 22)
+            threading.Thread(target=clear_just_built, daemon=True).start()
+    
+    def _compile_shaders_for_build(self, project_dir):
+        """Compile shaders in the project and output to compiler log.
+        Returns: (success: bool, compilation_time: float in seconds)
+        """
+        # Check if we have hot shaders first (they need to be compiled)
+        hot_shaders = self.find_hot_shaders()
+        if not hot_shaders:
+            return True, 0.0  # No shaders to compile, return 0 time
+        
+        shader_compile_start = time.time()
+        self.log_lines.append("Compiling shaders...")
+        
+        # Find glslc
+        glslc_found = False
+        glslc_path = None
+        
+        vulkan_sdk = os.environ.get("VULKAN_SDK")
+        if vulkan_sdk:
+            glslc_path = os.path.join(vulkan_sdk, "bin", "glslc.exe")
+            if os.path.exists(glslc_path):
+                glslc_found = True
+        
+        if not glslc_found:
+            import shutil
+            glslc_path = shutil.which("glslc")
+            if glslc_path:
+                glslc_found = True
+        
+        if not glslc_found:
+            self.log_lines.append("ERROR: glslc not found. Install Vulkan SDK or ensure glslc is in PATH.")
+            shader_compile_time = time.time() - shader_compile_start
+            return False, shader_compile_time
+        
+        compiled_count = 0
+        failed_count = 0
+        
+        for glsl_path in hot_shaders:
+            # Determine output path (.spv) - keep extension to avoid conflicts
+            if glsl_path.endswith('.glsl'):
+                spv_path = glsl_path[:-5] + '.spv'
+            elif glsl_path.endswith('.vert'):
+                spv_path = glsl_path + '.spv'  # my_shader.vert.spv
+            elif glsl_path.endswith('.frag'):
+                spv_path = glsl_path + '.spv'  # my_shader.frag.spv
+            elif glsl_path.endswith('.comp'):
+                spv_path = glsl_path + '.spv'  # my_shader.comp.spv
+            else:
+                spv_path = glsl_path + '.spv'
+            
+            # Determine shader stage for glslc
+            stage_flag = None
+            if glsl_path.endswith('.comp'):
+                stage_flag = "-fshader-stage=compute"
+            elif glsl_path.endswith('.vert'):
+                stage_flag = "-fshader-stage=vertex"
+            elif glsl_path.endswith('.frag'):
+                stage_flag = "-fshader-stage=fragment"
+            elif glsl_path.endswith('.geom'):
+                stage_flag = "-fshader-stage=geometry"
+            
+            # Compile shader
+            compile_cmd = [glslc_path]
+            if stage_flag:
+                compile_cmd.append(stage_flag)
+            compile_cmd.extend([glsl_path, "-o", spv_path])
+            
+            rel_path = os.path.relpath(glsl_path, project_dir)
+            result = self._run_step(f"Shader({os.path.basename(glsl_path)})", compile_cmd)
+            if result:
+                compiled_count += 1
+                self.log_lines.append(f"[OK] Compiled: {rel_path} -> {os.path.basename(spv_path)}")
+            else:
+                failed_count += 1
+                self.log_lines.append(f"[FAIL] Failed: {rel_path}")
+        
+        shader_compile_time = time.time() - shader_compile_start
+        
+        if compiled_count > 0:
+            self.log_lines.append(f"Shader compilation: {compiled_count} succeeded, {failed_count} failed")
+        elif failed_count > 0:
+            self.log_lines.append(f"Shader compilation failed: {failed_count} shader(s) failed")
+        
+        return failed_count == 0, shader_compile_time
     
     def _do_build(self, hd_path, cpp_path):
         """Build the C++ code with all necessary libraries and includes."""
@@ -1060,6 +1501,9 @@ class Editor:
         project_root = os.path.abspath(os.path.join(script_dir, ".."))
         project_dir = os.path.dirname(cpp_path)  # Project directory (where .hd file is)
         vulkan_helpers_path = os.path.join(project_root, "vulkan", "eden_vulkan_helpers.cpp")
+        
+        # Compile shaders first (if we have hot shaders)
+        shader_compile_success, shader_compile_time = self._compile_shaders_for_build(project_dir)
         
         # Ensure shader files exist in project directory
         shader_source_dir = os.path.join(project_root, "examples", "spinning_triangle")
@@ -1118,6 +1562,15 @@ class Editor:
         # Add output - build to project directory
         exe_name = os.path.splitext(os.path.basename(hd_path))[0] + ".exe"
         exe_path = os.path.join(project_dir, exe_name)
+        
+        # DIAGNOSTIC: Force delete old exe to prevent stale binary issues
+        if os.path.exists(exe_path):
+            try:
+                os.remove(exe_path)
+                self.log_lines.append(f"[DEBUG] Deleted old {exe_name} to force rebuild")
+            except Exception as e:
+                self.log_lines.append(f"[DEBUG] Could not delete {exe_name}: {e}")
+        
         build_cmd.extend(["-o", exe_path])
         
         # Add library paths
@@ -1137,6 +1590,15 @@ class Editor:
         build_cmd.extend(["-lvulkan-1", "-lglfw3", "-lgdi32"])
         
         self._run_step("Build", build_cmd)
+        
+        # DIAGNOSTIC: Verify build succeeded by checking timestamps
+        if os.path.exists(exe_path) and os.path.exists(cpp_path):
+            exe_time = os.path.getmtime(exe_path)
+            cpp_time = os.path.getmtime(cpp_path)
+            if exe_time > cpp_time:
+                self.log_lines.append(f"[DEBUG] Build OK: {exe_name} is newer than source")
+            else:
+                self.log_lines.append(f"[DEBUG] WARNING: {exe_name} may be stale (older than source)")
         
         # Also build hot-reloadable DLLs if they exist
         project_dir = os.path.dirname(cpp_path)
@@ -1166,31 +1628,102 @@ class Editor:
                     self.log_lines.append(f"  DLL built: {dll_name}")
                 else:
                     self.log_lines.append(f"  ERROR: Failed to build DLL {dll_name}")
+        
+        return shader_compile_time
     
     def hotload_dll(self):
-        """Rebuild hot-reloadable DLL(s) for @hot systems."""
+        """Rebuild hot-reloadable DLL(s) for @hot systems and compile hot shaders."""
         if not self.has_hot_systems():
-            self.status = "No @hot systems found"
-            self.log_lines.append("ERROR: No @hot systems found in current file")
+            self.status = "No @hot systems or shaders found"
+            self.log_lines.append("ERROR: No @hot systems or shaders found in current file")
             return
         
         self.save()
         hd_path = os.path.abspath(self.original_hd_path)
+        project_dir = os.path.dirname(hd_path)
         
-        # Step 1: Recompile HEIDIC source to regenerate DLL source
-        self.status = "Hotloading: Recompiling HEIDIC..."
-        pygame.display.flip()
-        result = self._run_step("Hotload-Compile", [p.format(file=hd_path, cpp="") for p in CMD_COMPILE])
+        # Step 1: Compile hot shaders (GLSL -> SPIR-V)
+        hot_shaders = self.find_hot_shaders()
+        if hot_shaders:
+            self.status = "Hotloading: Compiling shaders..."
+            pygame.display.flip()
+            glslc_found = False
+            glslc_path = None
+            
+            # Try to find glslc (from Vulkan SDK)
+            vulkan_sdk = os.environ.get("VULKAN_SDK")
+            if vulkan_sdk:
+                glslc_path = os.path.join(vulkan_sdk, "bin", "glslc.exe")
+                if os.path.exists(glslc_path):
+                    glslc_found = True
+            
+            # Try system PATH
+            if not glslc_found:
+                import shutil
+                glslc_path = shutil.which("glslc")
+                if glslc_path:
+                    glslc_found = True
+            
+            if glslc_found:
+                for glsl_path in hot_shaders:
+                    # Determine output path (.spv) - keep extension to avoid conflicts
+                    if glsl_path.endswith('.glsl'):
+                        spv_path = glsl_path[:-5] + '.spv'
+                    elif glsl_path.endswith('.vert'):
+                        spv_path = glsl_path + '.spv'  # my_shader.vert.spv
+                    elif glsl_path.endswith('.frag'):
+                        spv_path = glsl_path + '.spv'  # my_shader.frag.spv
+                    elif glsl_path.endswith('.comp'):
+                        spv_path = glsl_path + '.spv'  # my_shader.comp.spv
+                    else:
+                        spv_path = glsl_path + '.spv'
+                    
+                    # Determine shader stage for glslc
+                    stage_flag = None
+                    if glsl_path.endswith('.comp'):
+                        stage_flag = "-fshader-stage=compute"
+                    elif glsl_path.endswith('.vert'):
+                        stage_flag = "-fshader-stage=vertex"
+                    elif glsl_path.endswith('.frag'):
+                        stage_flag = "-fshader-stage=fragment"
+                    elif glsl_path.endswith('.geom'):
+                        stage_flag = "-fshader-stage=geometry"
+                    
+                    # Compile shader
+                    compile_cmd = [glslc_path]
+                    if stage_flag:
+                        compile_cmd.append(stage_flag)
+                    compile_cmd.extend([glsl_path, "-o", spv_path])
+                    
+                    result = self._run_step(f"Hotload-CompileShader({os.path.basename(glsl_path)})", compile_cmd)
+                    if result:
+                        self.log_lines.append(f"Hotload: Compiled shader {os.path.basename(glsl_path)} -> {os.path.basename(spv_path)}")
+                    else:
+                        self.log_lines.append(f"WARNING: Failed to compile shader {os.path.basename(glsl_path)}")
+            else:
+                self.log_lines.append("WARNING: glslc not found. Shader compilation skipped.")
+                self.log_lines.append("WARNING: Install Vulkan SDK or ensure glslc is in PATH.")
         
-        if not result:
-            self.status = "Hotload failed: Compilation error"
+        # Step 2: Recompile HEIDIC source to regenerate DLL source (only if we have hot systems)
+        dll_files = self.find_hot_dll_files()
+        if dll_files:
+            self.status = "Hotloading: Recompiling HEIDIC..."
+            pygame.display.flip()
+            result = self._run_step("Hotload-Compile", [p.format(file=hd_path, cpp="") for p in CMD_COMPILE])
+            
+            if not result:
+                self.status = "Hotload failed: Compilation error"
+                return
+        
+        # Step 3: Find and rebuild DLL files (only if we have hot systems)
+        if not dll_files and not hot_shaders:
+            self.status = "Hotload: No hot-reloadable items found"
+            self.log_lines.append("WARNING: No @hot systems or shaders to hotload")
             return
         
-        # Step 2: Find and rebuild DLL files
-        dll_files = self.find_hot_dll_files()
         if not dll_files:
-            self.status = "Hotload failed: No DLL source files found"
-            self.log_lines.append("ERROR: No *_hot.dll.cpp files found. Make sure @hot systems exist.")
+            # Only shaders, no systems - just report success
+            self.status = "Hotload: Shaders compiled successfully"
             return
         
         project_dir = os.path.dirname(hd_path)
@@ -1521,6 +2054,104 @@ def project_picker_dialog(screen, editor):
     return None
 
 
+def shader_picker_dialog(screen, editor):
+    """Simple shader picker that lists all shader files in the current project"""
+    if not editor.original_hd_path or not editor.original_hd_path.endswith(".hd"):
+        return None
+    
+    shaders = editor.find_shaders_in_project()
+    if not shaders:
+        return None
+    
+    font = pygame.font.SysFont("Consolas", 16)
+    dialog_width = 600
+    dialog_height = 400
+    dialog_x = (SCREEN_WIDTH - dialog_width) // 2
+    dialog_y = (SCREEN_HEIGHT - dialog_height) // 2
+    
+    selected_idx = 0
+    scroll_offset = 0
+    items_per_page = 15
+    item_height = 24
+    clock = pygame.time.Clock()
+    
+    running = True
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return None
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_RETURN:
+                    if shaders:
+                        return shaders[selected_idx][1]  # Return full path
+                elif event.key == pygame.K_ESCAPE:
+                    return None
+                elif event.key == pygame.K_UP:
+                    selected_idx = max(0, selected_idx - 1)
+                    if selected_idx < scroll_offset:
+                        scroll_offset = selected_idx
+                elif event.key == pygame.K_DOWN:
+                    selected_idx = min(len(shaders) - 1, selected_idx + 1)
+                    if selected_idx >= scroll_offset + items_per_page:
+                        scroll_offset = selected_idx - items_per_page + 1
+                elif event.key == pygame.K_PAGEUP:
+                    selected_idx = max(0, selected_idx - items_per_page)
+                    scroll_offset = max(0, scroll_offset - items_per_page)
+                elif event.key == pygame.K_PAGEDOWN:
+                    selected_idx = min(len(shaders) - 1, selected_idx + items_per_page)
+                    scroll_offset = min(max(0, len(shaders) - items_per_page), scroll_offset + items_per_page)
+        
+        # Redraw editor background
+        editor.draw(screen)
+        
+        # Draw semi-transparent overlay
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+        overlay.set_alpha(180)
+        overlay.fill((0, 0, 0))
+        screen.blit(overlay, (0, 0))
+        
+        # Draw dialog
+        dialog_surface = pygame.Surface((dialog_width, dialog_height))
+        dialog_surface.fill((50, 50, 50))
+        pygame.draw.rect(dialog_surface, (70, 70, 70), pygame.Rect(0, 0, dialog_width, dialog_height), 2)
+        
+        # Title
+        title_surf = font.render("Load Shader from Project:", True, (240, 240, 240))
+        dialog_surface.blit(title_surf, (10, 10))
+        
+        # List area
+        list_rect = pygame.Rect(10, 40, dialog_width - 20, dialog_height - 80)
+        pygame.draw.rect(dialog_surface, (30, 30, 30), list_rect)
+        pygame.draw.rect(dialog_surface, (100, 150, 255), list_rect, 2)
+        
+        # Draw shaders list
+        visible_start = scroll_offset
+        visible_end = min(len(shaders), scroll_offset + items_per_page)
+        for i in range(visible_start, visible_end):
+            idx = i
+            rel_path, _ = shaders[idx]
+            y_pos = list_rect.y + 5 + (i - scroll_offset) * item_height
+            
+            # Highlight selected
+            if idx == selected_idx:
+                highlight_rect = pygame.Rect(list_rect.x + 2, y_pos - 2, list_rect.width - 4, item_height)
+                pygame.draw.rect(dialog_surface, (70, 130, 200), highlight_rect)
+            
+            # Shader name
+            text_surf = font.render(rel_path, True, (240, 240, 240))
+            dialog_surface.blit(text_surf, (list_rect.x + 5, y_pos))
+        
+        # Instructions
+        hint_surf = font.render("↑↓: Select | Enter: Load | Esc: Cancel", True, (150, 150, 150))
+        dialog_surface.blit(hint_surf, (10, dialog_height - 30))
+        
+        screen.blit(dialog_surface, (dialog_x, dialog_y))
+        pygame.display.flip()
+        clock.tick(60)
+    
+    return None
+
+
 def main():
     # Start with empty editor or load from command line
     path = DEFAULT_FILE
@@ -1570,16 +2201,46 @@ def main():
                         copy_btn_rect = editor.log_copy_btn_rect
                         if copy_btn_rect.collidepoint(mx, my):
                             try:
-                                import tkinter as tk
-                                root = tk.Tk()
-                                root.withdraw()
-                                root.clipboard_clear()
                                 log_text = "\n".join(editor.log_lines) if editor.log_lines else ""
-                                root.clipboard_append(log_text)
-                                root.update()
-                                root.after(100, root.destroy)  # Give it time to copy
-                                root.destroy()
-                                editor.status = "Copied log to clipboard"
+                                if log_text:
+                                    # Use Windows clip command (most reliable on Windows)
+                                    try:
+                                        # Use shell=True and proper encoding
+                                        proc = subprocess.Popen(
+                                            'clip',
+                                            stdin=subprocess.PIPE,
+                                            stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE,
+                                            shell=True,
+                                            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                                        )
+                                        # Write text and close stdin
+                                        proc.stdin.write(log_text.encode('utf-8', errors='replace'))
+                                        proc.stdin.close()
+                                        proc.wait(timeout=2)
+                                        if proc.returncode == 0:
+                                            editor.status = "Copied log to clipboard"
+                                        else:
+                                            raise Exception(f"Clip command failed with code {proc.returncode}")
+                                    except Exception as clip_error:
+                                        # Fallback to pyperclip if available, then tkinter
+                                        try:
+                                            import pyperclip
+                                            pyperclip.copy(log_text)
+                                            editor.status = "Copied log to clipboard"
+                                        except ImportError:
+                                            # Final fallback to tkinter
+                                            import tkinter as tk
+                                            root = tk.Tk()
+                                            root.withdraw()
+                                            root.clipboard_clear()
+                                            root.clipboard_append(log_text)
+                                            root.update()
+                                            # Keep root alive long enough for clipboard to update
+                                            root.after(150, root.destroy)
+                                            editor.status = "Copied log to clipboard (tkinter)"
+                                else:
+                                    editor.status = "Log is empty"
                             except Exception as e:
                                 editor.status = f"Copy failed: {str(e)}"
                         # Log scrollbars
@@ -1637,16 +2298,46 @@ def main():
                         terminal_copy_btn = pygame.Rect(MARGIN, terminal_y + (TERMINAL_HEADER_HEIGHT - 22) // 2, TERMINAL_COPY_BTN_WIDTH, 22)
                         if terminal_copy_btn.collidepoint(mx, my):
                             try:
-                                import tkinter as tk
-                                root = tk.Tk()
-                                root.withdraw()
-                                root.clipboard_clear()
                                 term_text = "\n".join(editor.terminal_lines) if editor.terminal_lines else ""
-                                root.clipboard_append(term_text)
-                                root.update()
-                                root.after(100, root.destroy)  # Give it time to copy
-                                root.destroy()
-                                editor.status = "Copied terminal to clipboard"
+                                if term_text:
+                                    # Use Windows clip command (most reliable on Windows)
+                                    try:
+                                        # Use shell=True and proper encoding
+                                        proc = subprocess.Popen(
+                                            'clip',
+                                            stdin=subprocess.PIPE,
+                                            stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE,
+                                            shell=True,
+                                            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                                        )
+                                        # Write text and close stdin
+                                        proc.stdin.write(term_text.encode('utf-8', errors='replace'))
+                                        proc.stdin.close()
+                                        proc.wait(timeout=2)
+                                        if proc.returncode == 0:
+                                            editor.status = "Copied terminal to clipboard"
+                                        else:
+                                            raise Exception(f"Clip command failed with code {proc.returncode}")
+                                    except Exception as clip_error:
+                                        # Fallback to pyperclip if available, then tkinter
+                                        try:
+                                            import pyperclip
+                                            pyperclip.copy(term_text)
+                                            editor.status = "Copied terminal to clipboard"
+                                        except ImportError:
+                                            # Final fallback to tkinter
+                                            import tkinter as tk
+                                            root = tk.Tk()
+                                            root.withdraw()
+                                            root.clipboard_clear()
+                                            root.clipboard_append(term_text)
+                                            root.update()
+                                            # Keep root alive long enough for clipboard to update
+                                            root.after(150, root.destroy)
+                                            editor.status = "Copied terminal to clipboard (tkinter)"
+                                else:
+                                    editor.status = "Terminal is empty"
                             except Exception as e:
                                 editor.status = f"Copy failed: {str(e)}"
                         # Terminal scrollbars
@@ -1710,7 +2401,7 @@ def main():
                                     hd_filename = project_name + ".hd"
                                     new_path = os.path.join(project_dir, hd_filename)
                                     # Template with Vulkan rendering setup
-                                    # Check if this is a hotload project
+                                    # All projects now support shader hotloading
                                     if project_name.lower() == "hotload_test":
                                         # Create hot-reload template
                                         template = f"""// HEIDIC Project: {project_name}
@@ -1801,9 +2492,16 @@ fn main(): void {{
 }}
 """
                                     else:
-                                        # Regular template (with hot-reload support)
+                                        # All projects support shader hotloading - use default template
                                         template = f"""// HEIDIC Project: {project_name}
-// This project includes a basic Vulkan rendering window with hot-reload support
+// This project supports shader hotloading - add @hot shader declarations to use it!
+
+extern fn heidic_glfw_vulkan_hints(): void;
+extern fn heidic_init_renderer(window: GLFWwindow): i32;
+extern fn heidic_render_frame(window: GLFWwindow): void;
+extern fn heidic_set_rotation_speed(speed: f32): void;
+extern fn heidic_cleanup_renderer(): void;
+extern fn heidic_sleep_ms(milliseconds: i32): void;
 
 extern fn heidic_glfw_vulkan_hints(): void;
 extern fn heidic_init_renderer(window: GLFWwindow): i32;
@@ -1813,6 +2511,11 @@ extern fn heidic_cleanup_renderer(): void;
 extern fn heidic_sleep_ms(milliseconds: i32): void;
 
 // Hot-reloadable system - edit values and use Hotload button to see changes instantly!
+// To add shader hotloading, add @hot shader declarations:
+// @hot
+// shader vertex "shaders/my_shader.vert" {{}}
+// @hot
+// shader fragment "shaders/my_shader.frag" {{}}
 @hot
 system(game_state) {{
     fn get_rotation_speed(): f32 {{
@@ -1888,7 +2591,7 @@ fn main(): void {{
                                     with open(new_path, "w", encoding="utf-8") as f:
                                         f.write(template)
                                     
-                                    # Copy shader files to project directory
+                                    # Copy default shader files to project directory (all projects)
                                     script_dir = os.path.dirname(os.path.abspath(__file__))
                                     project_root = os.path.abspath(os.path.join(script_dir, ".."))
                                     shader_source_dir = os.path.join(project_root, "examples", "spinning_triangle")
@@ -1909,7 +2612,9 @@ fn main(): void {{
                                     
                                     editor.path = new_path
                                     editor.original_hd_path = new_path
+                                    editor.view_mode = "hd"
                                     editor.viewing_hd = True
+                                    editor.current_shader_path = None
                                     editor.lines = editor._load_file(new_path)
                                     editor.cursor_x = 0
                                     editor.cursor_y = 0
@@ -1924,15 +2629,11 @@ fn main(): void {{
                                 if selected_path and os.path.exists(selected_path):
                                     editor.path = selected_path
                                     editor.original_hd_path = selected_path if selected_path.endswith(".hd") else selected_path
+                                    editor.view_mode = "hd"
                                     editor.viewing_hd = True
+                                    editor.current_shader_path = None
                                     editor.lines = editor._load_file(selected_path)
-                                    editor.cursor_x = 0
-                                    editor.cursor_y = 0
-                                    editor.scroll = 0
-                                    editor.hscroll = 0
-                                    editor.log_lines = []
-                                    editor.log_vscroll = 0
-                                    editor.log_hscroll = 0
+                                    editor._reset_editor_state()
                                     editor.status = f"Loaded {selected_path}"
                             elif action == "save":
                                 editor.save()
@@ -1941,9 +2642,16 @@ fn main(): void {{
                             elif action == "hotload":
                                 if editor.has_hot_systems():
                                     editor.hotload_dll()
+                            elif action == "compile_shaders":
+                                if editor.has_shaders():
+                                    editor.compile_shaders_only()
+                            elif action == "load_shader":
+                                if editor.has_shaders():
+                                    selected_shader = shader_picker_dialog(screen, editor)
+                                    if selected_shader:
+                                        editor.load_shader(selected_shader)
                             elif action == "cpp":
-                                if editor.cpp_file_exists():
-                                    editor.toggle_cpp_view()
+                                editor.toggle_view()  # Cycles HD -> C++ -> SD -> HD
                             elif action == "reload":
                                 editor.lines = editor._load_file(editor.path)
                                 editor.cursor_x = 0

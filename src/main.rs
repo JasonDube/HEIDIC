@@ -8,7 +8,6 @@ mod ast;
 mod type_checker;
 mod codegen;
 mod error;
-mod hot_reload;
 
 use lexer::Lexer;
 use parser::Parser;

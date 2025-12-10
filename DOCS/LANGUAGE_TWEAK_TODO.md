@@ -10,11 +10,14 @@ This document tracks language feature improvements and enhancements for HEIDIC_v
 
 These are the features that will make HEIDIC legendary:
 
-- [ ] **1. Hot-Reloading by Default** - `@hot` attribute on systems/components/shaders
-  - Status: 🔴 Not Started
+- [x] **1. Hot-Reloading by Default** - `@hot` attribute on systems/components/shaders
+  - Status: 🟡 **75% Complete**
   - Priority: CRITICAL (The Killer Feature)
-  - Effort: ~1-2 weeks
+  - Effort: ~3-5 days remaining (entity storage integration)
   - Impact: Zero-downtime iteration - the feature that made Jai famous
+  - **✅ System Hot-Reload**: Fully implemented and working
+  - **✅ Shader Hot-Reload**: Fully implemented and working  
+  - **🟡 Component Hot-Reload**: Foundation complete (parsing, metadata, migration templates), needs entity storage integration
 
 - [ ] **2. Built-in Resource Handles** - `resource Image = "textures/brick.png"`
   - Status: 🔴 Not Started

@@ -33,6 +33,12 @@ int heidic_init_renderer_cube(GLFWwindow* window);
 void heidic_render_frame_cube(GLFWwindow* window);
 void heidic_cleanup_renderer_cube();
 
+// Ball rendering functions (for bouncing_balls test case)
+int heidic_init_renderer_balls(GLFWwindow* window);
+// positions: float[ball_count * 3], sizes: float[ball_count]
+void heidic_render_balls(GLFWwindow* window, int32_t ball_count, float* positions, float* sizes);
+void heidic_cleanup_renderer_balls();
+
 // ImGui functions
 int heidic_init_imgui(GLFWwindow* window);
 void heidic_imgui_new_frame();

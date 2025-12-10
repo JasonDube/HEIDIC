@@ -6,6 +6,7 @@ pub struct CodeGenerator {
     components: HashMap<String, ComponentDef>,  // Store component metadata for SOA detection
     hot_systems: Vec<SystemDef>,  // Store hot-reloadable systems
     hot_shaders: Vec<ShaderDef>,  // Store hot-reloadable shaders
+    hot_components: Vec<ComponentDef>,  // Store hot-reloadable components
 }
 
 impl CodeGenerator {
@@ -14,34 +15,20 @@ impl CodeGenerator {
             components: HashMap::new(),
             hot_systems: Vec::new(),
             hot_shaders: Vec::new(),
+            hot_components: Vec::new(),
         }
     }
     
     pub fn generate(&mut self, program: &Program) -> Result<String> {
         let mut output = String::new();
         
-        // Generate includes and standard library
-        output.push_str("#include <iostream>\n");
-        output.push_str("#include <vector>\n");
-        output.push_str("#include <string>\n");
-        output.push_str("#include <unordered_map>\n");
-        output.push_str("#include <memory>\n");
-        output.push_str("#include <cmath>\n");
-        output.push_str("#include <cstdint>\n");
-        output.push_str("\n");
-        
-        // Include EDEN standard library (Vulkan, GLFW, GLM math, ImGui)
-        output.push_str("// EDEN ENGINE Standard Library\n");
-        output.push_str("#include \"stdlib/vulkan.h\"\n");
-        output.push_str("#include \"stdlib/glfw.h\"\n");
-        output.push_str("#include \"stdlib/math.h\"\n");
-        output.push_str("#include \"stdlib/imgui.h\"\n");
-        output.push_str("\n");
-        
-        // First pass: collect component metadata (for SOA detection), hot systems, and hot shaders
+        // First pass: collect component metadata (for SOA detection), hot systems, hot shaders, and hot components
         for item in &program.items {
             if let Item::Component(c) = item {
                 self.components.insert(c.name.clone(), c.clone());
+                if c.is_hot {
+                    self.hot_components.push(c.clone());
+                }
             }
             if let Item::System(s) = item {
                 if s.is_hot {
@@ -54,6 +41,32 @@ impl CodeGenerator {
                 }
             }
         }
+        
+        // Generate includes and standard library (AFTER collecting hot items so we know what to include)
+        output.push_str("#include <iostream>\n");
+        output.push_str("#include <vector>\n");
+        output.push_str("#include <string>\n");
+        output.push_str("#include <unordered_map>\n");
+        output.push_str("#include <memory>\n");
+        output.push_str("#include <cmath>\n");
+        output.push_str("#include <cstdint>\n");
+        // Include chrono if we have hot components (for ECS timing) or hot systems/shaders
+        if !self.hot_components.is_empty() || !self.hot_systems.is_empty() || !self.hot_shaders.is_empty() {
+            output.push_str("#include <chrono>\n");
+        }
+        output.push_str("\n");
+        
+        // Include EDEN standard library (Vulkan, GLFW, GLM math, ImGui)
+        output.push_str("// EDEN ENGINE Standard Library\n");
+        output.push_str("#include \"stdlib/vulkan.h\"\n");
+        output.push_str("#include \"stdlib/glfw.h\"\n");
+        output.push_str("#include \"stdlib/math.h\"\n");
+        output.push_str("#include \"stdlib/imgui.h\"\n");
+        // Include entity storage if we have hot components
+        if !self.hot_components.is_empty() {
+            output.push_str("#include \"stdlib/entity_storage.h\"\n");
+        }
+        output.push_str("\n");
         
         // Generate structs and components
         for item in &program.items {
@@ -73,17 +86,22 @@ impl CodeGenerator {
         for item in &program.items {
             if let Item::ExternFunction(ext) = item {
                 output.push_str("extern \"C\" {\n");
-                let return_type = self.type_to_cpp(&ext.return_type);
-                output.push_str(&format!("    {} {}(", return_type, ext.name));
-                for (i, param) in ext.params.iter().enumerate() {
-                    if i > 0 {
-                        output.push_str(", ");
+                // Special case: heidic_render_balls needs positions/sizes arrays when using ECS
+                if ext.name == "heidic_render_balls" && !self.hot_components.is_empty() {
+                    output.push_str(&format!("    void heidic_render_balls(GLFWwindow* window, int32_t ball_count, float* positions, float* sizes);\n"));
+                } else {
+                    let return_type = self.type_to_cpp(&ext.return_type);
+                    output.push_str(&format!("    {} {}(", return_type, ext.name));
+                    for (i, param) in ext.params.iter().enumerate() {
+                        if i > 0 {
+                            output.push_str(", ");
+                        }
+                        output.push_str(&format!("{} {}", 
+                            self.type_to_cpp(&param.ty), 
+                            param.name));
                     }
-                    output.push_str(&format!("{} {}", 
-                        self.type_to_cpp(&param.ty), 
-                        param.name));
+                    output.push_str(");\n");
                 }
-                output.push_str(");\n");
                 output.push_str("}\n");
                 
                 if let Some(ref lib) = ext.library {
@@ -193,6 +211,22 @@ impl CodeGenerator {
             output.push_str("\n");
         }
         
+        // Generate forward declarations for component hot-reload functions if we have hot components
+        if !self.hot_components.is_empty() {
+            output.push_str("// Component hot-reload function forward declarations\n");
+            output.push_str("void check_and_migrate_hot_components();\n");
+            output.push_str("void init_component_versions();\n");
+            output.push_str("\n");
+            
+            // Generate ECS storage globals
+            output.push_str("// ECS storage for hot components\n");
+            output.push_str("static EntityStorage g_storage;\n");
+            output.push_str("static std::vector<EntityId> g_entities;\n");
+            output.push_str("static constexpr float BOUNDS = 3.0f;\n");
+            output.push_str("static auto g_last_update_time = std::chrono::high_resolution_clock::now();\n");
+            output.push_str("\n");
+        }
+        
         // Generate function implementations (excluding hot systems)
         for f in &functions {
             // Check if this function is from a hot system
@@ -265,10 +299,19 @@ impl CodeGenerator {
             output.push_str("// File watching and auto-reload\n");
             output.push_str("#include <sys/stat.h>\n");
             output.push_str("#include <io.h>\n");
+            output.push_str("#include <chrono>\n");
             output.push_str("\n");
             output.push_str("static time_t g_last_dll_time = 0;\n");
+            output.push_str("static std::chrono::steady_clock::time_point g_startup_time = std::chrono::steady_clock::now();\n");
+            output.push_str("static const int STARTUP_GRACE_PERIOD_SECONDS = 3; // Ignore DLL changes for first 3 seconds after startup\n");
             output.push_str("\n");
             output.push_str("void check_and_reload_hot_system() {\n");
+            output.push_str("    // Ignore DLL changes during startup grace period (to avoid reloading immediately after build)\n");
+            output.push_str("    auto now = std::chrono::steady_clock::now();\n");
+            output.push_str("    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - g_startup_time).count();\n");
+            output.push_str("    if (elapsed < STARTUP_GRACE_PERIOD_SECONDS) {\n");
+            output.push_str("        return; // Still in startup grace period\n");
+            output.push_str("    }\n");
             for system in &self.hot_systems {
                 let dll_name = format!("{}.dll", system.name.to_lowercase());
                 output.push_str(&format!("    // Check {} DLL file modification time\n", system.name));
@@ -302,29 +345,31 @@ impl CodeGenerator {
             output.push_str("static std::map<std::string, time_t> g_shader_mtimes;\n");
             output.push_str("\n");
             output.push_str("void check_and_reload_hot_shaders() {\n");
-            for shader in &self.hot_shaders {
+            for (idx, shader) in self.hot_shaders.iter().enumerate() {
                 // Get the shader file path (could be .glsl or .spv)
                 let shader_path = &shader.path;
-                // Determine the .spv path (replace .glsl with .spv, or append .spv if no extension)
+                // Determine the .spv path - keep extension to avoid conflicts (e.g., my_shader.vert.spv)
                 let spv_path = if shader_path.ends_with(".glsl") {
                     shader_path.replace(".glsl", ".spv")
-                } else if shader_path.ends_with(".vert") {
-                    shader_path.replace(".vert", ".spv")
-                } else if shader_path.ends_with(".frag") {
-                    shader_path.replace(".frag", ".spv")
+                } else if shader_path.ends_with(".vert") || shader_path.ends_with(".frag") || shader_path.ends_with(".comp") {
+                    format!("{}.spv", shader_path)  // my_shader.vert.spv, my_shader.frag.spv
                 } else {
                     format!("{}.spv", shader_path)
                 };
                 
+                // Use unique variable name for each shader
+                let stat_var_name = format!("shader_stat_{}", idx);
+                
                 output.push_str(&format!("    // Check {} shader file modification time\n", shader_path));
-                output.push_str(&format!("    struct stat shader_stat;\n"));
-                output.push_str(&format!("    if (stat(\"{}\", &shader_stat) == 0) {{\n", spv_path));
+                output.push_str(&format!("    struct stat {};\n", stat_var_name));
+                output.push_str(&format!("    if (stat(\"{}\", &{}) == 0) {{\n", spv_path, stat_var_name));
                 output.push_str(&format!("        auto it = g_shader_mtimes.find(\"{}\");\n", spv_path));
                 output.push_str(&format!("        time_t last_mtime = (it != g_shader_mtimes.end()) ? it->second : 0;\n"));
-                output.push_str(&format!("        if (shader_stat.st_mtime > last_mtime) {{\n"));
-                output.push_str(&format!("            g_shader_mtimes[\"{}\"] = shader_stat.st_mtime;\n", spv_path));
+                output.push_str(&format!("        if ({}.st_mtime > last_mtime) {{\n", stat_var_name));
+                output.push_str(&format!("            g_shader_mtimes[\"{}\"] = {}.st_mtime;\n", spv_path, stat_var_name));
                 output.push_str(&format!("            std::cout << \"[Shader Hot-Reload] Detected change in {}, reloading...\" << std::endl;\n", spv_path));
-                output.push_str(&format!("            heidic_reload_shader(\"{}\");\n", spv_path));
+                // Pass the original source path so we can determine shader stage (vertex/fragment)
+                output.push_str(&format!("            heidic_reload_shader(\"{}\");\n", shader_path));
                 output.push_str(&format!("            std::cout << \"[Shader Hot-Reload] {} reloaded successfully!\" << std::endl;\n", spv_path));
                 output.push_str(&format!("        }}\n"));
                 output.push_str(&format!("    }}\n"));
@@ -333,21 +378,180 @@ impl CodeGenerator {
             output.push_str("\n");
             // Initialize shader modification times at startup
             output.push_str("static void init_shader_mtimes() {\n");
-            for shader in &self.hot_shaders {
+            for (idx, shader) in self.hot_shaders.iter().enumerate() {
                 let shader_path = &shader.path;
+                // Use same naming as check_and_reload_hot_shaders: keep extension for .vert/.frag/.comp
                 let spv_path = if shader_path.ends_with(".glsl") {
                     shader_path.replace(".glsl", ".spv")
-                } else if shader_path.ends_with(".vert") {
-                    shader_path.replace(".vert", ".spv")
-                } else if shader_path.ends_with(".frag") {
-                    shader_path.replace(".frag", ".spv")
+                } else if shader_path.ends_with(".vert") || shader_path.ends_with(".frag") || shader_path.ends_with(".comp") {
+                    format!("{}.spv", shader_path)  // my_shader.vert.spv, my_shader.frag.spv
                 } else {
                     format!("{}.spv", shader_path)
                 };
-                output.push_str(&format!("    struct stat shader_stat;\n"));
-                output.push_str(&format!("    if (stat(\"{}\", &shader_stat) == 0) {{\n", spv_path));
-                output.push_str(&format!("        g_shader_mtimes[\"{}\"] = shader_stat.st_mtime;\n", spv_path));
+                // Use unique variable name for each shader
+                let stat_var_name = format!("shader_stat_init_{}", idx);
+                output.push_str(&format!("    struct stat {};\n", stat_var_name));
+                output.push_str(&format!("    if (stat(\"{}\", &{}) == 0) {{\n", spv_path, stat_var_name));
+                output.push_str(&format!("        g_shader_mtimes[\"{}\"] = {}.st_mtime;\n", spv_path, stat_var_name));
                 output.push_str(&format!("    }}\n"));
+            }
+            output.push_str("}\n");
+            output.push_str("\n");
+        }
+        
+        // Generate component hot-reload runtime integration
+        if !self.hot_components.is_empty() {
+            output.push_str("\n// Component Hot-Reload Runtime Integration\n");
+            output.push_str("#include <sys/stat.h>\n");
+            output.push_str("#include <io.h>\n");
+            output.push_str("#include <map>\n");
+            output.push_str("#include <string>\n");
+            output.push_str("#include <cstring>\n");
+            output.push_str("#include <cstdio>\n");
+            output.push_str("\n");
+            
+            // Generate component metadata structs
+            output.push_str("// Component metadata for version tracking\n");
+            output.push_str("struct ComponentMetadata {\n");
+            output.push_str("    const char* name;\n");
+            output.push_str("    uint32_t version;\n");
+            output.push_str("    size_t size;\n");
+            output.push_str("    const char* field_signature;  // Hash of field names and types\n");
+            output.push_str("};\n");
+            output.push_str("\n");
+            output.push_str("// Storage for loaded field signatures (since we can't store const char* directly)\n");
+            for component in &self.hot_components {
+                let comp_name_lower = component.name.to_lowercase();
+                output.push_str(&format!("static char g_prev_sig_storage_{}[512] = {{0}};\n", comp_name_lower));
+            }
+            output.push_str("\n");
+            
+            // Generate metadata for each hot component
+            for component in &self.hot_components {
+                // Generate field signature (hash of field names and types)
+                let mut field_sig = String::new();
+                for field in &component.fields {
+                    field_sig.push_str(&field.name);
+                    field_sig.push(':');
+                    field_sig.push_str(&self.type_to_cpp(&field.ty));
+                    field_sig.push(';');
+                }
+                
+                // Generate component version (starts at 1, will increment on layout changes)
+                output.push_str(&format!("// Metadata for component: {}\n", component.name));
+                output.push_str(&format!("static ComponentMetadata g_metadata_{} = {{\n", component.name.to_lowercase()));
+                output.push_str(&format!("    \"{}\",\n", component.name));
+                output.push_str(&format!("    1,  // Version (increments when layout changes)\n"));
+                output.push_str(&format!("    sizeof({}),\n", component.name));
+                output.push_str(&format!("    \"{}\"  // Field signature\n", field_sig));
+                output.push_str("};\n");
+                output.push_str("\n");
+                
+                // Generate previous version metadata (for migration detection)
+                // This will be updated when the layout changes
+                output.push_str(&format!("// Previous version metadata (for migration)\n"));
+                output.push_str(&format!("static ComponentMetadata g_prev_metadata_{} = {{\n", component.name.to_lowercase()));
+                output.push_str(&format!("    \"{}\",\n", component.name));
+                output.push_str(&format!("    0,  // Previous version (0 = no previous version)\n"));
+                output.push_str(&format!("    0,  // Previous size\n"));
+                output.push_str(&format!("    \"\"  // Previous field signature\n"));
+                output.push_str("};\n");
+                output.push_str("\n");
+            }
+            
+            // Generate version tracking map
+            output.push_str("// Track component versions at runtime\n");
+            output.push_str("static std::map<std::string, uint32_t> g_component_versions;\n");
+            output.push_str("static std::map<std::string, time_t> g_component_file_mtimes;\n");
+            output.push_str("\n");
+            
+            // Generate migration functions for each component
+            // These functions migrate from previous version to current version
+            for component in &self.hot_components {
+                self.generate_migration_function(&mut output, component);
+            }
+            
+            // Generate initialization function
+            output.push_str("void init_component_versions() {\n");
+            output.push_str("    // Load previous component metadata from text file (if it exists)\n");
+            output.push_str("    // Format: ComponentName:Version:FieldSignature (one per line)\n");
+            output.push_str("    FILE* meta_file = fopen(\".heidic_component_versions.txt\", \"r\");\n");
+            output.push_str("    if (meta_file) {\n");
+            output.push_str("        char line[1024];\n");
+            output.push_str("        while (fgets(line, sizeof(line), meta_file)) {\n");
+            output.push_str("            char name[256], sig[512];\n");
+            output.push_str("            uint32_t version;\n");
+            output.push_str("            if (sscanf(line, \"%255[^:]:%u:%511[^\\n]\", name, &version, sig) == 3) {\n");
+            for component in &self.hot_components {
+                let comp_name_lower = component.name.to_lowercase();
+                output.push_str(&format!("                if (strcmp(name, \"{}\") == 0) {{\n", component.name));
+                output.push_str(&format!("                    g_prev_metadata_{}.name = \"{}\";\n", comp_name_lower, component.name));
+                output.push_str(&format!("                    g_prev_metadata_{}.version = version;\n", comp_name_lower));
+                output.push_str(&format!("                    strncpy(g_prev_sig_storage_{}, sig, sizeof(g_prev_sig_storage_{}) - 1);\n", comp_name_lower, comp_name_lower));
+                output.push_str(&format!("                    g_prev_metadata_{}.field_signature = g_prev_sig_storage_{};\n", comp_name_lower, comp_name_lower));
+                output.push_str(&format!("                }}\n"));
+            }
+            output.push_str("            }\n");
+            output.push_str("        }\n");
+            output.push_str("        fclose(meta_file);\n");
+            output.push_str("    } else {\n");
+            output.push_str("        // First run: initialize previous metadata to current\n");
+            for component in &self.hot_components {
+                let comp_name_lower = component.name.to_lowercase();
+                output.push_str(&format!("        g_prev_metadata_{} = g_metadata_{};\n", comp_name_lower, comp_name_lower));
+            }
+            output.push_str("    }\n");
+            output.push_str("    \n");
+            output.push_str("    // Initialize version tracking\n");
+            for component in &self.hot_components {
+                let comp_name_lower = component.name.to_lowercase();
+                output.push_str(&format!("    g_component_versions[\"{}\"] = g_metadata_{}.version;\n", 
+                    component.name, comp_name_lower));
+            }
+            output.push_str("    \n");
+            output.push_str("    // Save current metadata to file for next run\n");
+            output.push_str("    meta_file = fopen(\".heidic_component_versions.txt\", \"w\");\n");
+            output.push_str("    if (meta_file) {\n");
+            for component in &self.hot_components {
+                let comp_name_lower = component.name.to_lowercase();
+                output.push_str(&format!("        fprintf(meta_file, \"{}:%u:%s\\n\", g_metadata_{}.version, g_metadata_{}.field_signature);\n", 
+                    component.name, comp_name_lower, comp_name_lower));
+            }
+            output.push_str("        fclose(meta_file);\n");
+            output.push_str("    }\n");
+            output.push_str("}\n");
+            output.push_str("\n");
+            
+            // Generate component layout change detection and migration
+            output.push_str("void check_and_migrate_hot_components() {\n");
+            output.push_str("    // Check each hot component for layout changes\n");
+            for component in &self.hot_components {
+                let comp_name_lower = component.name.to_lowercase();
+                output.push_str(&format!("    // Check component: {}\n", component.name));
+                output.push_str(&format!("    if (g_prev_metadata_{}.version > 0 && ", comp_name_lower));
+                output.push_str(&format!("strcmp(g_metadata_{}.field_signature, g_prev_metadata_{}.field_signature) != 0) {{\n", 
+                    comp_name_lower, comp_name_lower));
+                output.push_str(&format!("        std::cout << \"[Component Hot-Reload] Detected layout change in {}, migrating entities...\" << std::endl;\n", 
+                    component.name));
+                output.push_str(&format!("        migrate_{}(g_prev_metadata_{}.version, g_metadata_{}.version);\n", 
+                    comp_name_lower, comp_name_lower, comp_name_lower));
+                output.push_str(&format!("        // Update previous metadata to current\n"));
+                output.push_str(&format!("        g_prev_metadata_{} = g_metadata_{};\n", comp_name_lower, comp_name_lower));
+                output.push_str(&format!("        g_component_versions[\"{}\"] = g_metadata_{}.version;\n", 
+                    component.name, comp_name_lower));
+                output.push_str(&format!("        // Save updated metadata to file\n"));
+                output.push_str(&format!("        FILE* meta_file = fopen(\".heidic_component_versions.txt\", \"w\");\n"));
+                output.push_str(&format!("        if (meta_file) {{\n"));
+                for comp in &self.hot_components {
+                    let comp_lower = comp.name.to_lowercase();
+                    output.push_str(&format!("            fprintf(meta_file, \"{}:%u:%s\\n\", g_metadata_{}.version, g_metadata_{}.field_signature);\n", 
+                        comp.name, comp_lower, comp_lower));
+                }
+                output.push_str(&format!("            fclose(meta_file);\n"));
+                output.push_str(&format!("        }}\n"));
+                output.push_str(&format!("        std::cout << \"[Component Hot-Reload] {} migration complete!\" << std::endl;\n", 
+                    component.name));
+                output.push_str("    }\n");
             }
             output.push_str("}\n");
             output.push_str("\n");
@@ -372,6 +576,10 @@ impl CodeGenerator {
             // Initialize shader modification times at startup
             if !self.hot_shaders.is_empty() {
                 output.push_str("    init_shader_mtimes();\n");
+            }
+            // Initialize component versions at startup
+            if !self.hot_components.is_empty() {
+                output.push_str("    init_component_versions();\n");
             }
             output.push_str("    heidic_main();\n");
             // Only unload hot system if we have hot systems
@@ -445,6 +653,96 @@ impl CodeGenerator {
         &self.hot_systems
     }
     
+    // Generate migration function for a component
+    fn generate_migration_function(&self, output: &mut String, component: &ComponentDef) {
+        let comp_name_lower = component.name.to_lowercase();
+        
+        // Migration function signature
+        output.push_str(&format!("// Migration function for component: {}\n", component.name));
+        output.push_str(&format!("// Migrates entity data from old version to new version\n"));
+        output.push_str(&format!("void migrate_{}(uint32_t old_version, uint32_t new_version) {{\n", comp_name_lower));
+        output.push_str(&format!("    std::cout << \"[Component Migration] {}: v\" << old_version << \" -> v\" << new_version << std::endl;\n", 
+            component.name));
+        
+        if component.fields.is_empty() {
+            output.push_str("    // No fields to migrate (empty component)\n");
+            output.push_str("    return;\n");
+            output.push_str("}\n");
+            return;
+        }
+        
+        // Parse old field signature to determine which fields existed in old version
+        output.push_str(&format!("    // Parse old field signature to determine which fields existed in old version\n"));
+        output.push_str(&format!("    std::string old_sig = g_prev_metadata_{}.field_signature;\n", comp_name_lower));
+        
+        // Generate field existence checks for each field
+        // Field signature format: "field_name:type;"
+        for field in &component.fields {
+            let type_name = self.type_to_cpp(&field.ty);
+            output.push_str(&format!("    bool has_{}_in_old = old_sig.find(\"{}:{}\") != std::string::npos;\n", 
+                field.name, field.name, type_name));
+        }
+        output.push_str("\n");
+        
+        // Collect all entities with this component first (to avoid iterator invalidation)
+        output.push_str(&format!("    // Collect all entities with {} component (to avoid iterator invalidation during migration)\n", component.name));
+        output.push_str("    std::vector<EntityId> entities_to_migrate;\n");
+        output.push_str(&format!("    g_storage.for_each<{}>([&](EntityId e, {}&) {{\n", component.name, component.name));
+        output.push_str("        entities_to_migrate.push_back(e);\n");
+        output.push_str(&format!("    }});\n"));
+        output.push_str("\n");
+        output.push_str("    // Migrate each entity\n");
+        output.push_str("    int migrated_count = 0;\n");
+        output.push_str("    for (EntityId e : entities_to_migrate) {\n");
+        output.push_str(&format!("        {}* old_comp_ptr = g_storage.get_component<{}>(e);\n", component.name, component.name));
+        output.push_str("        if (!old_comp_ptr) continue;  // Entity no longer has component\n");
+        output.push_str(&format!("        {} old_comp = *old_comp_ptr;  // Copy old data before removing\n", component.name));
+        output.push_str("\n");
+        output.push_str(&format!("        // Create new component instance, zero-initialized\n"));
+        output.push_str(&format!("        {} new_comp{{}};\n", component.name));
+        output.push_str("\n");
+        
+        // Copy fields that existed in old version, use defaults for new fields
+        output.push_str("        // Copy fields that existed in old version\n");
+        for field in &component.fields {
+            let default_val = self.get_default_value_for_type(&field.ty);
+            output.push_str(&format!("        if (has_{}_in_old) {{\n", field.name));
+            output.push_str(&format!("            new_comp.{} = old_comp.{};  // Copy existing field\n", field.name, field.name));
+            output.push_str(&format!("        }} else {{\n"));
+            output.push_str(&format!("            new_comp.{} = {};  // New field, use default\n", field.name, default_val));
+            output.push_str(&format!("        }}\n"));
+        }
+        
+        output.push_str("\n");
+        output.push_str("        // Replace old component with new one\n");
+        output.push_str(&format!("        g_storage.remove_component<{}>(e);\n", component.name));
+        output.push_str(&format!("        g_storage.add_component<{}>(e, new_comp);\n", component.name));
+        output.push_str("        migrated_count++;\n");
+        output.push_str("    }\n");
+        
+        output.push_str("\n");
+        output.push_str(&format!("    std::cout << \"[Component Migration] Migrated \" << migrated_count << \" {} entities\" << std::endl;\n", 
+            component.name));
+        output.push_str("}\n");
+        output.push_str("\n");
+    }
+    
+    // Get default value for a type (for new fields in migrations)
+    fn get_default_value_for_type(&self, ty: &Type) -> String {
+        match ty {
+            Type::I32 | Type::I64 => "0",
+            Type::F32 | Type::F64 => "0.0f",
+            Type::Bool => "false",
+            Type::String => "\"\"",
+            Type::Vec2 => "Vec2(0.0f, 0.0f)",
+            Type::Vec3 => "Vec3(0.0f, 0.0f, 0.0f)",
+            Type::Vec4 => "Vec4(0.0f, 0.0f, 0.0f, 1.0f)",
+            Type::Mat4 => "Mat4(1.0f)", // Identity matrix
+            Type::Array(_) => "{}", // Empty array
+            _ => "{}", // Default initialization
+        }.to_string()
+    }
+    
     fn generate_struct(&self, s: &StructDef, indent: usize) -> String {
         let mut output = format!("struct {} {{\n", s.name);
         for field in &s.fields {
@@ -505,8 +803,95 @@ impl CodeGenerator {
         }
         output.push_str(") {\n");
         
-        for stmt in &f.body {
-            output.push_str(&self.generate_statement(stmt, indent + 1));
+        // Inject ECS initialization if we have hot components and this is main
+        if f.name == "main" && !self.hot_components.is_empty() {
+            let mut injected_ecs = false;
+            for (_i, stmt) in f.body.iter().enumerate() {
+                output.push_str(&self.generate_statement(stmt, indent + 1));
+                
+                // After ball_count assignment, inject ECS initialization
+                if !injected_ecs {
+                    if let Statement::Let { name, .. } = stmt {
+                        if name == "ball_count" {
+                            // CRITICAL: Add debug IMMEDIATELY after ball_count to verify this code executes
+                            // Use same indentation as surrounding statements (indent + 1 = 1 = 4 spaces for main)
+                            let ecs_indent = self.indent(indent + 1);
+                            output.push_str(&format!("{}\n", ecs_indent));
+                            output.push_str(&format!("{}    // ========== ECS INITIALIZATION START ==========\n", ecs_indent));
+                            output.push_str(&format!("{}    try {{\n", ecs_indent));
+                            output.push_str(&format!("{}        std::cout << \"\\n=== [ECS] Starting entity creation... ===\\n\" << std::endl;\n", ecs_indent));
+                            output.push_str(&format!("{}        std::cout.flush();\n", ecs_indent));
+                            output.push_str(&format!("{}\n", ecs_indent));
+                            output.push_str(&format!("{}        // Create entities with hot components in ECS\n", ecs_indent));
+                            output.push_str(&format!("{}        g_entities.clear();\n", ecs_indent));
+                            output.push_str(&format!("{}        const float init_pos[][3] = {{\n", ecs_indent));
+                            output.push_str(&format!("{}            {{0.0f, 0.0f, 0.0f}},\n", ecs_indent));
+                            output.push_str(&format!("{}            {{1.5f, 0.5f, -1.0f}},\n", ecs_indent));
+                            output.push_str(&format!("{}            {{-1.0f, 1.0f, 0.5f}},\n", ecs_indent));
+                            output.push_str(&format!("{}            {{0.5f, -1.2f, 1.0f}},\n", ecs_indent));
+                            output.push_str(&format!("{}            {{-1.5f, -0.5f, -1.5f}},\n", ecs_indent));
+                            output.push_str(&format!("{}        }};\n", ecs_indent));
+                            output.push_str(&format!("{}        const float init_vel[][3] = {{\n", ecs_indent));
+                            output.push_str(&format!("{}            {{1.0f, 0.5f, 0.3f}},\n", ecs_indent));
+                            output.push_str(&format!("{}            {{-0.8f, 0.6f, -0.4f}},\n", ecs_indent));
+                            output.push_str(&format!("{}            {{0.4f, -0.7f, 0.5f}},\n", ecs_indent));
+                            output.push_str(&format!("{}            {{0.6f, 0.8f, -0.3f}},\n", ecs_indent));
+                            output.push_str(&format!("{}            {{-0.5f, -0.4f, 0.7f}},\n", ecs_indent));
+                            output.push_str(&format!("{}        }};\n", ecs_indent));
+                            output.push_str(&format!("{}        for (int i = 0; i < ball_count; ++i) {{\n", ecs_indent));
+                            output.push_str(&format!("{}            EntityId e = g_storage.create_entity();\n", ecs_indent));
+                            output.push_str(&format!("{}            g_entities.push_back(e);\n", ecs_indent));
+                            
+                            // Generate component initialization based on hot components
+                            for comp in &self.hot_components {
+                                if comp.name == "Position" {
+                                    output.push_str(&format!("{}            {} p{{init_pos[i][0], init_pos[i][1], init_pos[i][2]", ecs_indent, comp.name));
+                                    // Add default values for additional fields
+                                    for field in &comp.fields {
+                                        if field.name != "x" && field.name != "y" && field.name != "z" {
+                                            if field.name == "size" {
+                                                output.push_str(", 0.2f");
+                                            } else {
+                                                output.push_str(", 0.0f");
+                                            }
+                                        }
+                                    }
+                                    output.push_str("};\n");
+                                    output.push_str(&format!("{}            g_storage.add_component<{}>(e, p);\n", ecs_indent, comp.name));
+                                } else if comp.name == "Velocity" {
+                                    output.push_str(&format!("{}            {} v{{init_vel[i][0], init_vel[i][1], init_vel[i][2]}};\n", ecs_indent, comp.name));
+                                    output.push_str(&format!("{}            g_storage.add_component<{}>(e, v);\n", ecs_indent, comp.name));
+                                }
+                            }
+                            
+                            output.push_str(&format!("{}        }}\n", ecs_indent));
+                            output.push_str(&format!("{}        std::cout << \"=== [ECS] Created \" << ball_count << \" entities (g_entities.size()=\" << g_entities.size() << \") ===\\n\" << std::endl;\n", ecs_indent));
+                            output.push_str(&format!("{}        std::cout.flush();\n", ecs_indent));
+                            output.push_str(&format!("{}        std::cout << \"[ECS Init] g_entities.size()=\" << g_entities.size() << std::endl;\n", ecs_indent));
+                            output.push_str(&format!("{}        if (!g_entities.empty()) {{\n", ecs_indent));
+                            output.push_str(&format!("{}            auto* p = g_storage.get_component<Position>(g_entities[0]);\n", ecs_indent));
+                            output.push_str(&format!("{}            auto* v = g_storage.get_component<Velocity>(g_entities[0]);\n", ecs_indent));
+                            output.push_str(&format!("{}            if (p && v) {{\n", ecs_indent));
+                            output.push_str(&format!("{}                std::cout << \"[ECS Init] Entity 0: pos=(\" << p->x << \",\" << p->y << \",\" << p->z << \") vel=(\" << v->x << \",\" << v->y << \",\" << v->z << \")\" << std::endl;\n", ecs_indent));
+                            output.push_str(&format!("{}            }} else {{\n", ecs_indent));
+                            output.push_str(&format!("{}                std::cout << \"[ECS Init] ERROR: Entity 0 missing components!\" << std::endl;\n", ecs_indent));
+                            output.push_str(&format!("{}            }}\n", ecs_indent));
+                            output.push_str(&format!("{}        }}\n", ecs_indent));
+                            output.push_str(&format!("{}    }} catch (const std::exception& e) {{\n", ecs_indent));
+                            output.push_str(&format!("{}        std::cout << \"[ECS ERROR] Exception: \" << e.what() << std::endl;\n", ecs_indent));
+                            output.push_str(&format!("{}    }} catch (...) {{\n", ecs_indent));
+                            output.push_str(&format!("{}        std::cout << \"[ECS ERROR] Unknown exception in ECS initialization!\" << std::endl;\n", ecs_indent));
+                            output.push_str(&format!("{}    }}\n", ecs_indent));
+                            injected_ecs = true;
+                        }
+                    }
+                }
+            }
+        } else {
+            // Normal generation without ECS injection
+            for stmt in &f.body {
+                output.push_str(&self.generate_statement(stmt, indent + 1));
+            }
         }
         
         // If it's main with void return type, add return 0
@@ -660,11 +1045,20 @@ impl CodeGenerator {
                 } else {
                     "auto".to_string()
                 };
-                format!("{}    {} {} = {};\n", 
+                let mut output = format!("{}    {} {} = {};\n", 
                     self.indent(indent),
                     type_str,
                     name,
-                    self.generate_expression(value))
+                    self.generate_expression(value));
+                
+                // Special case: Add immediate debug after ball_count to verify execution
+                if name == "ball_count" && !self.hot_components.is_empty() {
+                    output.push_str(&format!("{}    std::cout << \"[IMMEDIATE DEBUG] ball_count just set to \" << {} << std::endl;\n", 
+                        self.indent(indent), name));
+                    output.push_str(&format!("{}    std::cout.flush();\n", self.indent(indent)));
+                }
+                
+                output
             }
             Statement::Assign { target, value } => {
                 format!("{}    {} = {};\n",
@@ -700,6 +1094,10 @@ impl CodeGenerator {
                 if !self.hot_shaders.is_empty() {
                     // Add shader hot-reload check at the start of each while loop iteration
                     output.push_str(&format!("{}        check_and_reload_hot_shaders();\n", self.indent(indent + 1)));
+                }
+                if !self.hot_components.is_empty() {
+                    // Add component hot-reload check at the start of each while loop iteration
+                    output.push_str(&format!("{}        check_and_migrate_hot_components();\n", self.indent(indent + 1)));
                 }
                 for stmt in body {
                     output.push_str(&self.generate_statement(stmt, indent + 1));
@@ -744,9 +1142,95 @@ impl CodeGenerator {
                 }
             }
             Statement::Expression(expr) => {
-                format!("{}    {};\n",
-                    self.indent(indent),
-                    self.generate_expression(expr))
+                let expr_str = self.generate_expression(expr);
+                // If this is a call to heidic_render_balls and we have hot components, wrap it with ECS code
+                if !self.hot_components.is_empty() && expr_str.contains("heidic_render_balls") {
+                    let mut output = String::new();
+                    // Extract ball_count from the call - for now, assume it's the second argument
+                    output.push_str(&format!("{}            \n", self.indent(indent)));
+                    output.push_str(&format!("{}            // Update physics using ECS (integrate positions with velocities)\n", self.indent(indent)));
+                    output.push_str(&format!("{}            auto now = std::chrono::high_resolution_clock::now();\n", self.indent(indent)));
+                    output.push_str(&format!("{}            auto dt_us = std::chrono::duration_cast<std::chrono::microseconds>(now - g_last_update_time);\n", self.indent(indent)));
+                    output.push_str(&format!("{}            float dt = dt_us.count() / 1'000'000.0f;\n", self.indent(indent)));
+                    output.push_str(&format!("{}            if (dt > 0.1f) dt = 0.016f; // clamp\n", self.indent(indent)));
+                    output.push_str(&format!("{}            g_last_update_time = now;\n", self.indent(indent)));
+                    output.push_str(&format!("{}            \n", self.indent(indent)));
+                    output.push_str(&format!("{}            float speed_scale = 1.0f;\n", self.indent(indent)));
+                    // Check if we have get_movement_speed hot function
+                    let has_speed_func = self.hot_systems.iter().any(|s| {
+                        s.functions.iter().any(|f| f.name == "get_movement_speed")
+                    });
+                    if has_speed_func {
+                        output.push_str(&format!("{}            if (g_get_movement_speed) {{\n", self.indent(indent)));
+                        output.push_str(&format!("{}                speed_scale = g_get_movement_speed();\n", self.indent(indent)));
+                        output.push_str(&format!("{}            }}\n", self.indent(indent)));
+                    }
+                    output.push_str(&format!("{}            \n", self.indent(indent)));
+                    output.push_str(&format!("{}            // Update positions using velocities from ECS\n", self.indent(indent)));
+                    output.push_str(&format!("{}            for (EntityId e : g_entities) {{\n", self.indent(indent)));
+                    // Generate component access based on hot components
+                    let has_position = self.hot_components.iter().any(|c| c.name == "Position");
+                    let has_velocity = self.hot_components.iter().any(|c| c.name == "Velocity");
+                    if has_position && has_velocity {
+                        output.push_str(&format!("{}                auto* p = g_storage.get_component<Position>(e);\n", self.indent(indent)));
+                        output.push_str(&format!("{}                auto* v = g_storage.get_component<Velocity>(e);\n", self.indent(indent)));
+                        output.push_str(&format!("{}                if (!p || !v) continue;\n", self.indent(indent)));
+                        output.push_str(&format!("{}                \n", self.indent(indent)));
+                        output.push_str(&format!("{}                // Integrate: pos += vel * dt * speed_scale\n", self.indent(indent)));
+                        output.push_str(&format!("{}                p->x += v->x * dt * speed_scale;\n", self.indent(indent)));
+                        output.push_str(&format!("{}                p->y += v->y * dt * speed_scale;\n", self.indent(indent)));
+                        output.push_str(&format!("{}                p->z += v->z * dt * speed_scale;\n", self.indent(indent)));
+                        output.push_str(&format!("{}                \n", self.indent(indent)));
+                        output.push_str(&format!("{}                // Bounce off walls\n", self.indent(indent)));
+                        output.push_str(&format!("{}                auto bounce_axis = [&](float& pos, float& vel) {{\n", self.indent(indent)));
+                        output.push_str(&format!("{}                    if (pos > BOUNDS || pos < -BOUNDS) {{\n", self.indent(indent)));
+                        output.push_str(&format!("{}                        vel = -vel;\n", self.indent(indent)));
+                        output.push_str(&format!("{}                        pos = (pos > BOUNDS) ? BOUNDS : -BOUNDS;\n", self.indent(indent)));
+                        output.push_str(&format!("{}                    }}\n", self.indent(indent)));
+                        output.push_str(&format!("{}                }};\n", self.indent(indent)));
+                        output.push_str(&format!("{}                bounce_axis(p->x, v->x);\n", self.indent(indent)));
+                        output.push_str(&format!("{}                bounce_axis(p->y, v->y);\n", self.indent(indent)));
+                        output.push_str(&format!("{}                bounce_axis(p->z, v->z);\n", self.indent(indent)));
+                    }
+                    output.push_str(&format!("{}            }}\n", self.indent(indent)));
+                    output.push_str(&format!("{}            \n", self.indent(indent)));
+                    output.push_str(&format!("{}            // Build arrays for renderer from ECS data\n", self.indent(indent)));
+                    output.push_str(&format!("{}            std::vector<float> positions;\n", self.indent(indent)));
+                    output.push_str(&format!("{}            positions.reserve(ball_count * 3);\n", self.indent(indent)));
+                    output.push_str(&format!("{}            std::vector<float> sizes;\n", self.indent(indent)));
+                    output.push_str(&format!("{}            sizes.reserve(ball_count);\n", self.indent(indent)));
+                    output.push_str(&format!("{}            for (EntityId e : g_entities) {{\n", self.indent(indent)));
+                    if has_position {
+                        output.push_str(&format!("{}                auto* p = g_storage.get_component<Position>(e);\n", self.indent(indent)));
+                        output.push_str(&format!("{}                if (!p) {{\n", self.indent(indent)));
+                        output.push_str(&format!("{}                    positions.insert(positions.end(), {{0.0f, 0.0f, 0.0f}});\n", self.indent(indent)));
+                        output.push_str(&format!("{}                    sizes.push_back(0.2f);\n", self.indent(indent)));
+                        output.push_str(&format!("{}                    continue;\n", self.indent(indent)));
+                        output.push_str(&format!("{}                }}\n", self.indent(indent)));
+                        output.push_str(&format!("{}                positions.push_back(p->x);\n", self.indent(indent)));
+                        output.push_str(&format!("{}                positions.push_back(p->y);\n", self.indent(indent)));
+                        output.push_str(&format!("{}                positions.push_back(p->z);\n", self.indent(indent)));
+                        // Check if Position has a size field
+                        let pos_has_size = self.hot_components.iter()
+                            .find(|c| c.name == "Position")
+                            .map(|c| c.fields.iter().any(|f| f.name == "size"))
+                            .unwrap_or(false);
+                        if pos_has_size {
+                            output.push_str(&format!("{}                sizes.push_back(p->size > 0.0f ? p->size : 0.2f);\n", self.indent(indent)));
+                        } else {
+                            output.push_str(&format!("{}                sizes.push_back(0.2f);\n", self.indent(indent)));
+                        }
+                    }
+                    output.push_str(&format!("{}            }}\n", self.indent(indent)));
+                    output.push_str(&format!("{}            \n", self.indent(indent)));
+                    // Replace heidic_render_balls call with version that takes positions/sizes
+                    let new_call = expr_str.replace("heidic_render_balls(window, ball_count)", 
+                        "heidic_render_balls(window, ball_count, positions.data(), sizes.data())");
+                    output.push_str(&format!("{}            {};\n", self.indent(indent), new_call));
+                    output
+                } else {
+                    format!("{}    {};\n", self.indent(indent), expr_str)
+                }
             }
             Statement::Block(stmts) => {
                 let mut output = format!("{}    {{\n", self.indent(indent));

@@ -260,10 +260,5 @@ impl Lexer {
         
         Ok(tokens)
     }
-    
-    // Legacy method for backward compatibility
-    pub fn tokenize_simple(&mut self) -> Result<Vec<Token>> {
-        Ok(self.tokenize()?.into_iter().map(|twl| twl.token).collect())
-    }
 }
 

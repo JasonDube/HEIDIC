@@ -8,6 +8,7 @@ pub enum Type {
     String,
     Array(Box<Type>),
     Struct(String),
+    #[allow(dead_code)] // Component system not yet fully implemented
     Component(String),
     Query(Vec<Type>), // query<Component1, Component2, ...>
     Void,
@@ -65,6 +66,7 @@ pub struct ComponentDef {
     pub name: String,
     pub fields: Vec<Field>,
     pub is_soa: bool,  // true if component_soa, false if regular component
+    pub is_hot: bool,  // true if marked with @hot
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +131,7 @@ pub enum Statement {
     Loop { body: Vec<Statement> },
     Return(Option<Expression>),
     Expression(Expression),
+    #[allow(dead_code)] // Block statements not yet fully implemented
     Block(Vec<Statement>),
 }
 
@@ -141,6 +144,7 @@ pub enum Expression {
     Call { name: String, args: Vec<Expression> },
     MemberAccess { object: Box<Expression>, member: String },
     Index { array: Box<Expression>, index: Box<Expression> },
+    #[allow(dead_code)] // Struct literals not yet fully implemented
     StructLiteral { name: String, fields: Vec<(String, Expression)> },
 }
 

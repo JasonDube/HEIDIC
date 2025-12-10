@@ -21,17 +21,6 @@ impl Parser {
         }
     }
     
-    // Legacy constructor for backward compatibility
-    pub fn new_simple(tokens: Vec<Token>) -> Self {
-        let tokens_with_location: Vec<TokenWithLocation> = tokens.into_iter()
-            .map(|token| TokenWithLocation {
-                token,
-                location: SourceLocation::unknown(),
-            })
-            .collect();
-        Self::new(tokens_with_location)
-    }
-    
     pub fn parse(&mut self) -> Result<Program> {
         let mut items = Vec::new();
         
@@ -50,11 +39,11 @@ impl Parser {
             }
             Token::Component => {
                 self.advance();
-                Ok(Item::Component(self.parse_component(false)?))
+                Ok(Item::Component(self.parse_component(false, false)?))
             }
             Token::ComponentSOA => {
                 self.advance();
-                Ok(Item::Component(self.parse_component(true)?))
+                Ok(Item::Component(self.parse_component(true, false)?))
             }
             Token::System => {
                 self.advance();
@@ -97,8 +86,14 @@ impl Parser {
                 } else if self.check(&Token::Shader) {
                     self.advance();
                     Ok(Item::Shader(self.parse_shader(true)?))
+                } else if self.check(&Token::Component) {
+                    self.advance();
+                    Ok(Item::Component(self.parse_component(false, true)?))
+                } else if self.check(&Token::ComponentSOA) {
+                    self.advance();
+                    Ok(Item::Component(self.parse_component(true, true)?))
                 } else {
-                    bail!("Expected 'system' or 'shader' after '@hot'");
+                    bail!("Expected 'system', 'shader', or 'component' after '@hot'");
                 }
             }
             Token::Extern => {
@@ -129,7 +124,7 @@ impl Parser {
         Ok(StructDef { name, fields })
     }
     
-    fn parse_component(&mut self, is_soa: bool) -> Result<ComponentDef> {
+    fn parse_component(&mut self, is_soa: bool, is_hot: bool) -> Result<ComponentDef> {
         let name = self.expect_ident()?;
         self.expect(&Token::LBrace)?;
         
@@ -142,7 +137,7 @@ impl Parser {
         }
         self.expect(&Token::RBrace)?;
         
-        Ok(ComponentDef { name, fields, is_soa })
+        Ok(ComponentDef { name, fields, is_soa, is_hot })
     }
     
     fn parse_system(&mut self, is_hot: bool) -> Result<SystemDef> {
@@ -871,23 +866,11 @@ impl Parser {
         &self.tokens[self.current].token
     }
     
-    fn peek_location(&self) -> SourceLocation {
-        if self.current < self.tokens.len() {
-            self.tokens[self.current].location
-        } else {
-            SourceLocation::unknown()
-        }
-    }
-    
     fn advance(&mut self) {
         if !self.is_at_end() {
             self.current_location = self.tokens[self.current].location;
             self.current += 1;
         }
-    }
-    
-    fn current_location(&self) -> SourceLocation {
-        self.current_location
     }
     
     fn is_at_end(&self) -> bool {

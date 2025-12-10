@@ -40,7 +40,12 @@ static VkDevice g_device = VK_NULL_HANDLE;
 static VkSwapchainKHR g_swapchain = VK_NULL_HANDLE;
 static VkRenderPass g_renderPass = VK_NULL_HANDLE;
 static VkPipeline g_pipeline = VK_NULL_HANDLE;
+static VkPipeline g_cubePipeline = VK_NULL_HANDLE;
 static VkPipelineLayout g_pipelineLayout = VK_NULL_HANDLE;
+// Vertex buffers for custom shaders (when they need vertex input)
+static VkBuffer g_triangleVertexBuffer = VK_NULL_HANDLE;
+static VkDeviceMemory g_triangleVertexBufferMemory = VK_NULL_HANDLE;
+static bool g_usingCustomShaders = false; // Track if we're using custom shaders that need vertex buffers
 static std::vector<VkFramebuffer> g_framebuffers;
 static VkCommandPool g_commandPool = VK_NULL_HANDLE;
 static std::vector<VkCommandBuffer> g_commandBuffers;
@@ -531,8 +536,59 @@ extern "C" int heidic_init_renderer(GLFWwindow* window) {
     }
     
     // 9. Create graphics pipeline
-    auto vertShaderCode = readFile("vert_3d.spv");
-    auto fragShaderCode = readFile("frag_3d.spv");
+    // Try to load custom shaders first (if they exist), otherwise use default shaders
+    std::vector<char> vertShaderCode, fragShaderCode;
+    bool loadedCustomShaders = false;
+    
+    // Try loading custom shaders first
+    std::vector<std::string> vertPaths = {
+        "shaders/my_shader.vert.spv",
+        "my_shader.vert.spv"
+    };
+    std::vector<std::string> fragPaths = {
+        "shaders/my_shader.frag.spv",
+        "my_shader.frag.spv"
+    };
+    
+    // Try to load custom vertex shader
+    for (const auto& path : vertPaths) {
+        try {
+            vertShaderCode = readFile(path);
+            loadedCustomShaders = true;
+            g_usingCustomShaders = true;  // Mark that we're using custom shaders
+            std::cout << "[EDEN] Loaded custom vertex shader: " << path << std::endl;
+            break;
+        } catch (...) {
+            // Try next path
+        }
+    }
+    
+    // Try to load custom fragment shader
+    for (const auto& path : fragPaths) {
+        try {
+            fragShaderCode = readFile(path);
+            if (loadedCustomShaders) {
+                std::cout << "[EDEN] Loaded custom fragment shader: " << path << std::endl;
+                break;
+            }
+        } catch (...) {
+            // Try next path
+        }
+    }
+    
+    // Fall back to default shaders if custom ones weren't found
+    if (!loadedCustomShaders || fragShaderCode.empty()) {
+        try {
+            vertShaderCode = readFile("vert_3d.spv");
+            fragShaderCode = readFile("frag_3d.spv");
+            g_usingCustomShaders = false;  // Using default shaders
+            std::cout << "[EDEN] Using default shaders (vert_3d.spv, frag_3d.spv)" << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "[EDEN] ERROR: Could not load shader files!" << std::endl;
+            std::cerr << "[EDEN] Tried custom and default shaders, error: " << e.what() << std::endl;
+            return 0;
+        }
+    }
     
     VkShaderModuleCreateInfo vertCreateInfo = {};
     vertCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -571,8 +627,56 @@ extern "C" int heidic_init_renderer(GLFWwindow* window) {
     
     VkPipelineVertexInputStateCreateInfo vertexInputInfo = {};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertexInputInfo.vertexBindingDescriptionCount = 0;
-    vertexInputInfo.vertexAttributeDescriptionCount = 0;
+    
+    // Set up vertex input if using custom shaders
+    VkVertexInputBindingDescription bindingDescription = {};
+    VkVertexInputAttributeDescription attributeDescriptions[2] = {};
+    
+    if (g_usingCustomShaders) {
+        // Set up vertex input for custom shaders
+        bindingDescription.binding = 0;
+        bindingDescription.stride = sizeof(Vertex);
+        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        
+        attributeDescriptions[0].binding = 0;
+        attributeDescriptions[0].location = 0;
+        attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attributeDescriptions[0].offset = offsetof(Vertex, pos);
+        
+        attributeDescriptions[1].binding = 0;
+        attributeDescriptions[1].location = 1;
+        attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attributeDescriptions[1].offset = offsetof(Vertex, color);
+        
+        vertexInputInfo.vertexBindingDescriptionCount = 1;
+        vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+        vertexInputInfo.vertexAttributeDescriptionCount = 2;
+        vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions;
+        
+        // Create vertex buffer for triangle
+        std::vector<Vertex> triangleVertices = {
+            {{ 0.0f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}},  // Bottom (red)
+            {{ 0.5f,  0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}},  // Top-right (green)
+            {{-0.5f,  0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}}   // Top-left (blue)
+        };
+        
+        VkDeviceSize bufferSize = sizeof(Vertex) * triangleVertices.size();
+        createBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                   g_triangleVertexBuffer, g_triangleVertexBufferMemory);
+        
+        // Copy vertex data to buffer
+        void* data;
+        vkMapMemory(g_device, g_triangleVertexBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, triangleVertices.data(), (size_t)bufferSize);
+        vkUnmapMemory(g_device, g_triangleVertexBufferMemory);
+        
+        std::cout << "[EDEN] Created vertex buffer for custom shaders" << std::endl;
+    } else {
+        // Default shaders use hardcoded vertices (no vertex input)
+        vertexInputInfo.vertexBindingDescriptionCount = 0;
+        vertexInputInfo.vertexAttributeDescriptionCount = 0;
+    }
     
     VkPipelineInputAssemblyStateCreateInfo inputAssembly = {};
     inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -631,11 +735,18 @@ extern "C" int heidic_init_renderer(GLFWwindow* window) {
     colorBlending.attachmentCount = 1;
     colorBlending.pAttachments = &colorBlendAttachment;
     
+    // Push constant for per-ball model matrix (so each draw has unique transform)
+    VkPushConstantRange pushConstantRange = {};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = sizeof(Mat4);
+    
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
     pipelineLayoutInfo.pSetLayouts = &g_descriptorSetLayout;
-    pipelineLayoutInfo.pushConstantRangeCount = 0;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
     
     if (vkCreatePipelineLayout(g_device, &pipelineLayoutInfo, nullptr, &g_pipelineLayout) != VK_SUCCESS) {
         std::cerr << "[EDEN] ERROR: Failed to create pipeline layout!" << std::endl;
@@ -887,8 +998,17 @@ extern "C" void heidic_render_frame(GLFWwindow* window) {
     // Bind descriptor set (contains model/view/proj matrices)
     vkCmdBindDescriptorSets(g_commandBuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, g_pipelineLayout, 0, 1, &g_descriptorSets[imageIndex], 0, nullptr);
     
-    // Draw triangle (3 vertices - hardcoded in shader)
-    vkCmdDraw(g_commandBuffers[imageIndex], 3, 1, 0, 0);
+    // Draw triangle
+    if (g_usingCustomShaders && g_triangleVertexBuffer != VK_NULL_HANDLE) {
+        // Custom shaders use vertex buffers
+        VkBuffer vertexBuffers[] = {g_triangleVertexBuffer};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(g_commandBuffers[imageIndex], 0, 1, vertexBuffers, offsets);
+        vkCmdDraw(g_commandBuffers[imageIndex], 3, 1, 0, 0);
+    } else {
+        // Default shaders use hardcoded vertices (3 vertices - hardcoded in shader)
+        vkCmdDraw(g_commandBuffers[imageIndex], 3, 1, 0, 0);
+    }
     
     vkCmdEndRenderPass(g_commandBuffers[imageIndex]);
     
@@ -966,6 +1086,16 @@ extern "C" void heidic_cleanup_renderer() {
     }
     if (g_inFlightFence != VK_NULL_HANDLE) {
         vkDestroyFence(g_device, g_inFlightFence, nullptr);
+    }
+    
+    // Cleanup triangle vertex buffer (for custom shaders)
+    if (g_triangleVertexBuffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(g_device, g_triangleVertexBuffer, nullptr);
+        g_triangleVertexBuffer = VK_NULL_HANDLE;
+    }
+    if (g_triangleVertexBufferMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(g_device, g_triangleVertexBufferMemory, nullptr);
+        g_triangleVertexBufferMemory = VK_NULL_HANDLE;
     }
     
     // Cleanup command pool
@@ -1062,19 +1192,66 @@ extern "C" void heidic_reload_shader(const char* shader_path) {
     vkDeviceWaitIdle(g_device);
     
     std::string shaderPathStr(shader_path);
-    bool isTriangleShader = (shaderPathStr.find("vert_3d.spv") != std::string::npos || 
-                             shaderPathStr.find("frag_3d.spv") != std::string::npos);
-    bool isCubeShader = (shaderPathStr.find("vert_cube.spv") != std::string::npos || 
-                         shaderPathStr.find("frag_cube.spv") != std::string::npos);
     
-    if (!isTriangleShader && !isCubeShader) {
-        std::cerr << "[Shader Hot-Reload] WARNING: Unknown shader path: " << shader_path << std::endl;
-        return;
+    // Determine the .spv path from the source path (shader_path is now the original source)
+    // Helper lambda for C++17-compatible ends_with check
+    auto endsWith = [](const std::string& str, const std::string& suffix) -> bool {
+        if (suffix.length() > str.length()) return false;
+        return str.compare(str.length() - suffix.length(), suffix.length(), suffix) == 0;
+    };
+    
+    // Compile to .vert.spv, .frag.spv, etc. to avoid conflicts
+    std::string spv_path = shaderPathStr;
+    if (endsWith(spv_path, ".vert")) {
+        spv_path = spv_path + ".spv";  // my_shader.vert.spv
+    } else if (endsWith(spv_path, ".frag")) {
+        spv_path = spv_path + ".spv";  // my_shader.frag.spv
+    } else if (endsWith(spv_path, ".glsl")) {
+        spv_path = spv_path.substr(0, spv_path.length() - 5) + ".spv";
+    } else if (endsWith(spv_path, ".comp")) {
+        spv_path = spv_path + ".spv";  // my_shader.comp.spv
+    } else if (!endsWith(spv_path, ".spv")) {
+        spv_path = spv_path + ".spv";
     }
     
-    // Determine which shader stage and pipeline we're reloading
-    bool isVertex = (shaderPathStr.find("vert") != std::string::npos);
-    bool isFragment = (shaderPathStr.find("frag") != std::string::npos);
+    // Extract just the filename for matching
+    std::string filename = shaderPathStr;
+    size_t lastSlash = shaderPathStr.find_last_of("/\\");
+    if (lastSlash != std::string::npos) {
+        filename = shaderPathStr.substr(lastSlash + 1);
+    }
+    
+    // Check for various shader naming patterns
+    bool isTriangleShader = (shaderPathStr.find("vert_3d") != std::string::npos || 
+                             shaderPathStr.find("frag_3d") != std::string::npos ||
+                             shaderPathStr.find("my_shader") != std::string::npos ||
+                             filename.find("my_shader") != std::string::npos ||
+                             shaderPathStr.find("/vert") != std::string::npos ||
+                             shaderPathStr.find("\\vert") != std::string::npos);
+    bool isCubeShader = (shaderPathStr.find("vert_cube") != std::string::npos || 
+                         shaderPathStr.find("frag_cube") != std::string::npos);
+    
+    // Default to triangle pipeline if not cube shader
+    if (!isTriangleShader && !isCubeShader) {
+        // Try to infer from path - if it's a .vert or .frag (and not cube), assume triangle pipeline
+        if (shaderPathStr.find(".vert") != std::string::npos || 
+            shaderPathStr.find(".frag") != std::string::npos) {
+            isTriangleShader = true;
+        } else {
+            std::cerr << "[Shader Hot-Reload] WARNING: Unknown shader path: " << shader_path << std::endl;
+            return;
+        }
+    }
+    
+    // Determine which shader stage we're reloading from the source file extension
+    bool isVertex = (shaderPathStr.find(".vert") != std::string::npos || filename.find(".vert") != std::string::npos);
+    bool isFragment = (shaderPathStr.find(".frag") != std::string::npos || filename.find(".frag") != std::string::npos);
+    
+    // Detect if this is a custom shader (my_shader pattern) that needs vertex input
+    bool isCustomShader = (shaderPathStr.find("my_shader") != std::string::npos || filename.find("my_shader") != std::string::npos);
+    if (isCustomShader) {
+        g_usingCustomShaders = true;
+    }
     
     VkShaderModule* targetModule = nullptr;
     VkPipeline* targetPipeline = nullptr;
@@ -1100,12 +1277,12 @@ extern "C" void heidic_reload_shader(const char* shader_path) {
         return;
     }
     
-    // Read new shader code
+    // Read new shader code from the .spv file
     std::vector<char> shaderCode;
     try {
-        shaderCode = readFile(shaderPathStr);
+        shaderCode = readFile(spv_path);
     } catch (const std::exception& e) {
-        std::cerr << "[Shader Hot-Reload] ERROR: Failed to read shader file: " << e.what() << std::endl;
+        std::cerr << "[Shader Hot-Reload] ERROR: Failed to read shader file " << spv_path << ": " << e.what() << std::endl;
         return;
     }
     
@@ -1171,10 +1348,60 @@ extern "C" void heidic_reload_shader(const char* shader_path) {
     // Recreate pipeline (triangle or cube)
     if (isTriangleShader) {
         // Triangle pipeline setup
+        // Custom shaders (my_shader) need vertex input, default shaders don't
         VkPipelineVertexInputStateCreateInfo vertexInputInfo = {};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertexInputInfo.vertexBindingDescriptionCount = 0;
-        vertexInputInfo.vertexAttributeDescriptionCount = 0;
+        
+        VkVertexInputBindingDescription bindingDescription = {};
+        VkVertexInputAttributeDescription attributeDescriptions[2] = {};
+        
+        if (g_usingCustomShaders) {
+            // Set up vertex input for custom shaders
+            bindingDescription.binding = 0;
+            bindingDescription.stride = sizeof(Vertex);
+            bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+            
+            attributeDescriptions[0].binding = 0;
+            attributeDescriptions[0].location = 0;
+            attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+            attributeDescriptions[0].offset = offsetof(Vertex, pos);
+            
+            attributeDescriptions[1].binding = 0;
+            attributeDescriptions[1].location = 1;
+            attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+            attributeDescriptions[1].offset = offsetof(Vertex, color);
+            
+            vertexInputInfo.vertexBindingDescriptionCount = 1;
+            vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+            vertexInputInfo.vertexAttributeDescriptionCount = 2;
+            vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions;
+            
+            // Create vertex buffer for triangle if it doesn't exist
+            if (g_triangleVertexBuffer == VK_NULL_HANDLE) {
+                std::vector<Vertex> triangleVertices = {
+                    {{ 0.0f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}},  // Bottom (red)
+                    {{ 0.5f,  0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}},  // Top-right (green)
+                    {{-0.5f,  0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}}   // Top-left (blue)
+                };
+                
+                VkDeviceSize bufferSize = sizeof(Vertex) * triangleVertices.size();
+                createBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                           g_triangleVertexBuffer, g_triangleVertexBufferMemory);
+                
+                // Copy vertex data to buffer
+                void* data;
+                vkMapMemory(g_device, g_triangleVertexBufferMemory, 0, bufferSize, 0, &data);
+                memcpy(data, triangleVertices.data(), (size_t)bufferSize);
+                vkUnmapMemory(g_device, g_triangleVertexBufferMemory);
+                
+                std::cout << "[Shader Hot-Reload] Created vertex buffer for custom shaders" << std::endl;
+            }
+        } else {
+            // Default shaders use hardcoded vertices (no vertex input)
+            vertexInputInfo.vertexBindingDescriptionCount = 0;
+            vertexInputInfo.vertexAttributeDescriptionCount = 0;
+        }
         
         VkPipelineInputAssemblyStateCreateInfo inputAssembly = {};
         inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -1388,7 +1615,7 @@ static VkBuffer g_cubeVertexBuffer = VK_NULL_HANDLE;
 static VkDeviceMemory g_cubeVertexBufferMemory = VK_NULL_HANDLE;
 static VkBuffer g_cubeIndexBuffer = VK_NULL_HANDLE;
 static VkDeviceMemory g_cubeIndexBufferMemory = VK_NULL_HANDLE;
-static VkPipeline g_cubePipeline = VK_NULL_HANDLE;
+// g_cubePipeline is already declared at the top of the file (line 43)
 static uint32_t g_cubeIndexCount = 0;
 static float g_cubeRotationAngle = 0.0f;
 static std::chrono::high_resolution_clock::time_point g_cubeLastTime = std::chrono::high_resolution_clock::now();
@@ -1968,4 +2195,392 @@ extern "C" void heidic_imgui_render(VkCommandBuffer commandBuffer) {}
 extern "C" void heidic_cleanup_imgui() {}
 
 #endif // USE_IMGUI
+
+// ============================================================================
+// Ball Rendering Functions (for bouncing_balls test case)
+// ============================================================================
+
+// Static variables for ball rendering
+static VkPipeline g_ballsPipeline = VK_NULL_HANDLE;
+static bool g_ballsInitialized = false;
+static const int MAX_BALLS = 10;
+
+// Note: Ball data is now managed in ECS (EntityStorage) in the generated C++ code
+
+extern "C" int heidic_init_renderer_balls(GLFWwindow* window) {
+    // Initialize base renderer (creates device, swapchain, etc.)
+    if (heidic_init_renderer(window) == 0) {
+        return 0;
+    }
+    
+    // Destroy triangle pipeline since we'll use our own
+    if (g_pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(g_device, g_pipeline, nullptr);
+        g_pipeline = VK_NULL_HANDLE;
+    }
+    
+    // Reuse cube vertex/index buffers for balls (balls are rendered as small cubes)
+    if (g_cubeVertexBuffer == VK_NULL_HANDLE) {
+        // Create cube vertex buffer
+        VkDeviceSize vertexBufferSize = sizeof(cubeVertices[0]) * cubeVertices.size();
+        createBuffer(vertexBufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     g_cubeVertexBuffer, g_cubeVertexBufferMemory);
+        
+        void* data;
+        vkMapMemory(g_device, g_cubeVertexBufferMemory, 0, vertexBufferSize, 0, &data);
+        memcpy(data, cubeVertices.data(), (size_t)vertexBufferSize);
+        vkUnmapMemory(g_device, g_cubeVertexBufferMemory);
+        
+        // Create cube index buffer
+        VkDeviceSize indexBufferSize = sizeof(cubeIndices[0]) * cubeIndices.size();
+        g_cubeIndexCount = static_cast<uint32_t>(cubeIndices.size());
+        createBuffer(indexBufferSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     g_cubeIndexBuffer, g_cubeIndexBufferMemory);
+        
+        vkMapMemory(g_device, g_cubeIndexBufferMemory, 0, indexBufferSize, 0, &data);
+        memcpy(data, cubeIndices.data(), (size_t)indexBufferSize);
+        vkUnmapMemory(g_device, g_cubeIndexBufferMemory);
+    }
+    
+    // Load ball shaders (ball.vert.spv, ball.frag.spv)
+    std::vector<char> vertShaderCode, fragShaderCode;
+    try {
+        vertShaderCode = readFile("shaders/ball.vert.spv");
+        fragShaderCode = readFile("shaders/ball.frag.spv");
+        std::cout << "[EDEN] Loaded ball shaders successfully" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "[EDEN] Failed to load ball shaders: " << e.what() << std::endl;
+        std::cerr << "[EDEN] Falling back to default shaders" << std::endl;
+        try {
+            vertShaderCode = readFile("vert_3d.spv");
+            fragShaderCode = readFile("frag_3d.spv");
+        } catch (const std::exception& e2) {
+            std::cerr << "[EDEN] Failed to load default shaders: " << e2.what() << std::endl;
+            return 0;
+        }
+    }
+    
+    // Create shader modules
+    VkShaderModuleCreateInfo vertCreateInfo = {};
+    vertCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    vertCreateInfo.codeSize = vertShaderCode.size();
+    vertCreateInfo.pCode = reinterpret_cast<const uint32_t*>(vertShaderCode.data());
+    
+    VkShaderModule vertShaderModule = VK_NULL_HANDLE;
+    if (vkCreateShaderModule(g_device, &vertCreateInfo, nullptr, &vertShaderModule) != VK_SUCCESS) {
+        std::cerr << "[EDEN] ERROR: Failed to create vertex shader module!" << std::endl;
+        return 0;
+    }
+    
+    VkShaderModuleCreateInfo fragCreateInfo = {};
+    fragCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    fragCreateInfo.codeSize = fragShaderCode.size();
+    fragCreateInfo.pCode = reinterpret_cast<const uint32_t*>(fragShaderCode.data());
+    
+    VkShaderModule fragShaderModule = VK_NULL_HANDLE;
+    if (vkCreateShaderModule(g_device, &fragCreateInfo, nullptr, &fragShaderModule) != VK_SUCCESS) {
+        std::cerr << "[EDEN] ERROR: Failed to create fragment shader module!" << std::endl;
+        vkDestroyShaderModule(g_device, vertShaderModule, nullptr);
+        return 0;
+    }
+    
+    // Create pipeline for balls (same as cube pipeline but with ball shaders)
+    VkPipelineShaderStageCreateInfo vertShaderStageInfo = {};
+    vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    vertShaderStageInfo.module = vertShaderModule;
+    vertShaderStageInfo.pName = "main";
+    
+    VkPipelineShaderStageCreateInfo fragShaderStageInfo = {};
+    fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fragShaderStageInfo.module = fragShaderModule;
+    fragShaderStageInfo.pName = "main";
+    
+    VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
+    
+    // Vertex input (same as cube)
+    VkVertexInputBindingDescription bindingDescription = {};
+    bindingDescription.binding = 0;
+    bindingDescription.stride = sizeof(Vertex);
+    bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    
+    std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions = {};
+    attributeDescriptions[0].binding = 0;
+    attributeDescriptions[0].location = 0;
+    attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    attributeDescriptions[0].offset = offsetof(Vertex, pos);
+    
+    attributeDescriptions[1].binding = 0;
+    attributeDescriptions[1].location = 1;
+    attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    attributeDescriptions[1].offset = offsetof(Vertex, color);
+    
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo = {};
+    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInputInfo.vertexBindingDescriptionCount = 1;
+    vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+    vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+    vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
+    
+    // Pipeline state (same as cube)
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly = {};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    inputAssembly.primitiveRestartEnable = VK_FALSE;
+    
+    VkViewport viewport = {};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = (float)g_swapchainExtent.width;
+    viewport.height = (float)g_swapchainExtent.height;
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    
+    VkRect2D scissor = {};
+    scissor.offset = {0, 0};
+    scissor.extent = g_swapchainExtent;
+    
+    VkPipelineViewportStateCreateInfo viewportState = {};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.pViewports = &viewport;
+    viewportState.scissorCount = 1;
+    viewportState.pScissors = &scissor;
+    
+    VkPipelineRasterizationStateCreateInfo rasterizer = {};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizer.depthBiasEnable = VK_FALSE;
+    
+    VkPipelineMultisampleStateCreateInfo multisampling = {};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.sampleShadingEnable = VK_FALSE;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    
+    VkPipelineColorBlendAttachmentState colorBlendAttachment = {};
+    colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    colorBlendAttachment.blendEnable = VK_FALSE;
+    
+    VkPipelineColorBlendStateCreateInfo colorBlending = {};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.logicOpEnable = VK_FALSE;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &colorBlendAttachment;
+    
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &g_descriptorSetLayout;
+    pipelineLayoutInfo.pushConstantRangeCount = 0;
+    
+    if (vkCreatePipelineLayout(g_device, &pipelineLayoutInfo, nullptr, &g_pipelineLayout) != VK_SUCCESS) {
+        std::cerr << "[EDEN] Failed to create pipeline layout for balls" << std::endl;
+        vkDestroyShaderModule(g_device, fragShaderModule, nullptr);
+        vkDestroyShaderModule(g_device, vertShaderModule, nullptr);
+        return 0;
+    }
+    
+    VkGraphicsPipelineCreateInfo pipelineInfo = {};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = shaderStages;
+    pipelineInfo.pVertexInputState = &vertexInputInfo;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.layout = g_pipelineLayout;
+    pipelineInfo.renderPass = g_renderPass;
+    pipelineInfo.subpass = 0;
+    pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+    
+    if (vkCreateGraphicsPipelines(g_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &g_ballsPipeline) != VK_SUCCESS) {
+        std::cerr << "[EDEN] Failed to create graphics pipeline for balls" << std::endl;
+        vkDestroyPipelineLayout(g_device, g_pipelineLayout, nullptr);
+        vkDestroyShaderModule(g_device, fragShaderModule, nullptr);
+        vkDestroyShaderModule(g_device, vertShaderModule, nullptr);
+        return 0;
+    }
+    
+    vkDestroyShaderModule(g_device, fragShaderModule, nullptr);
+    vkDestroyShaderModule(g_device, vertShaderModule, nullptr);
+    
+    g_ballsInitialized = true;
+    std::cout << "[EDEN] Ball renderer initialized successfully!" << std::endl;
+    return 1;
+}
+
+extern "C" void heidic_render_balls(GLFWwindow* window, int32_t ball_count, float* positions, float* sizes) {
+    if (!g_ballsInitialized || g_device == VK_NULL_HANDLE || g_swapchain == VK_NULL_HANDLE) {
+        return;
+    }
+    
+    // Fallback: if no positions provided, use default static positions
+    static float default_positions[10 * 3] = {
+        0.0f, 0.0f, 0.0f,
+        1.5f, 0.5f, -1.0f,
+        -1.0f, 1.0f, 0.5f,
+        0.5f, -1.2f, 1.0f,
+        -1.5f, -0.5f, -1.5f
+    };
+    static float default_sizes[10] = {0.2f, 0.2f, 0.2f, 0.2f, 0.2f};
+    
+    static int render_frame_count = 0;
+    if (render_frame_count++ % 60 == 0) {
+        if (!positions) {
+            std::cout << "[Renderer] WARNING: positions array is null, using defaults!" << std::endl;
+        } else if (ball_count > 0) {
+            std::cout << "[Renderer] Ball 0 pos=(" << positions[0] << "," << positions[1] << "," << positions[2] << ")" << std::endl;
+        }
+    }
+    
+    if (!positions) {
+        positions = default_positions;
+        sizes = default_sizes;
+    }
+    
+    // Wait for previous frame
+    vkWaitForFences(g_device, 1, &g_inFlightFence, VK_TRUE, UINT64_MAX);
+    vkResetFences(g_device, 1, &g_inFlightFence);
+    
+    // Acquire next image
+    uint32_t imageIndex;
+    vkAcquireNextImageKHR(g_device, g_swapchain, UINT64_MAX, g_imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+    
+    // Reset command buffer
+    vkResetCommandBuffer(g_commandBuffers[imageIndex], 0);
+    
+    // Begin command buffer
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    vkBeginCommandBuffer(g_commandBuffers[imageIndex], &beginInfo);
+    
+    // Begin render pass
+    VkRenderPassBeginInfo renderPassInfo = {};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    renderPassInfo.renderPass = g_renderPass;
+    renderPassInfo.framebuffer = g_framebuffers[imageIndex];
+    renderPassInfo.renderArea.offset = {0, 0};
+    renderPassInfo.renderArea.extent = g_swapchainExtent;
+    
+    // Clear both color and depth so multiple cubes show up correctly each frame
+    VkClearValue clearValues[2];
+    clearValues[0].color = {{0.1f, 0.1f, 0.15f, 1.0f}};
+    clearValues[1].depthStencil = {1.0f, 0};
+    renderPassInfo.clearValueCount = 2;
+    renderPassInfo.pClearValues = clearValues;
+    
+    vkCmdBeginRenderPass(g_commandBuffers[imageIndex], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+    
+    // Bind pipeline
+    vkCmdBindPipeline(g_commandBuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, g_ballsPipeline);
+    
+    // Bind vertex and index buffers
+    VkBuffer vertexBuffers[] = {g_cubeVertexBuffer};
+    VkDeviceSize offsets[] = {0};
+    vkCmdBindVertexBuffers(g_commandBuffers[imageIndex], 0, 1, vertexBuffers, offsets);
+    vkCmdBindIndexBuffer(g_commandBuffers[imageIndex], g_cubeIndexBuffer, 0, VK_INDEX_TYPE_UINT16);
+    
+    // Render each ball as a small cube
+    int width, height;
+    glfwGetFramebufferSize(window, &width, &height);
+    float aspect = (float)width / (float)height;
+    
+    // View matrix - look at scene from above and to the side
+    Vec3 eye = {5.0f, 5.0f, 5.0f};
+    Vec3 center = {0.0f, 0.0f, 0.0f};
+    Vec3 up = {0.0f, 1.0f, 0.0f};
+    
+    // Projection matrix
+    float fov = 45.0f * 3.14159f / 180.0f;
+    float near = 0.1f;
+    float far = 100.0f;
+    
+    UniformBufferObject ubo = {};
+    ubo.view = mat4_lookat(eye, center, up);
+    ubo.proj = mat4_perspective(fov, aspect, near, far);
+    ubo.proj[1][1] *= -1.0f;  // Vulkan clip space
+    
+    // Render each ball (using positions/sizes from ECS)
+    int actual_count = (ball_count < MAX_BALLS) ? ball_count : MAX_BALLS;
+    for (int32_t i = 0; i < actual_count; i++) {
+        int idx = i * 3;
+        
+        // Model matrix - translate to ball position and scale based on provided size (default 0.2)
+        float sx = (sizes && sizes[i] > 0.0f) ? sizes[i] : 0.2f;
+        glm::vec3 pos(positions[idx], positions[idx + 1], positions[idx + 2]);
+        glm::mat4 model = glm::translate(glm::mat4(1.0f), pos);
+        model = glm::scale(model, glm::vec3(sx, sx, sx));
+        ubo.model = Mat4(model);
+        
+        // Update uniform buffer (view/proj only; model via push constants)
+        void* data;
+        vkMapMemory(g_device, g_uniformBuffersMemory[imageIndex], 0, sizeof(ubo), 0, &data);
+        memcpy(data, &ubo, sizeof(ubo));
+        vkUnmapMemory(g_device, g_uniformBuffersMemory[imageIndex]);
+        
+        // Push per-draw model matrix so each cube uses its own transform
+        vkCmdPushConstants(g_commandBuffers[imageIndex], g_pipelineLayout,
+                           VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &ubo.model);
+        
+        // Bind descriptor set
+        vkCmdBindDescriptorSets(g_commandBuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, 
+                                g_pipelineLayout, 0, 1, &g_descriptorSets[imageIndex], 0, nullptr);
+        
+        // Draw cube (ball)
+        vkCmdDrawIndexed(g_commandBuffers[imageIndex], g_cubeIndexCount, 1, 0, 0, 0);
+    }
+    
+    vkCmdEndRenderPass(g_commandBuffers[imageIndex]);
+    vkEndCommandBuffer(g_commandBuffers[imageIndex]);
+    
+    // Submit
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    
+    VkSemaphore waitSemaphores[] = {g_imageAvailableSemaphore};
+    VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = waitSemaphores;
+    submitInfo.pWaitDstStageMask = waitStages;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &g_commandBuffers[imageIndex];
+    
+    VkSemaphore signalSemaphores[] = {g_renderFinishedSemaphore};
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = signalSemaphores;
+    
+    vkQueueSubmit(g_graphicsQueue, 1, &submitInfo, g_inFlightFence);
+    
+    // Present
+    VkPresentInfoKHR presentInfo = {};
+    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = signalSemaphores;
+    
+    VkSwapchainKHR swapChains[] = {g_swapchain};
+    presentInfo.swapchainCount = 1;
+    presentInfo.pSwapchains = swapChains;
+    presentInfo.pImageIndices = &imageIndex;
+    
+    vkQueuePresentKHR(g_graphicsQueue, &presentInfo);
+}
+
+extern "C" void heidic_cleanup_renderer_balls() {
+    if (g_ballsPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(g_device, g_ballsPipeline, nullptr);
+        g_ballsPipeline = VK_NULL_HANDLE;
+    }
+    g_ballsInitialized = false;
+    // Note: We don't destroy base renderer resources here since they're shared
+}
 

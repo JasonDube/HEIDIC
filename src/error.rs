@@ -85,9 +85,5 @@ impl ErrorReporter {
         
         eprintln!(); // Blank line for readability
     }
-    
-    pub fn report_error_simple(&self, location: SourceLocation, message: &str) {
-        self.report_error(location, message, None);
-    }
 }
 

@@ -81,8 +81,9 @@ impl TypeChecker {
                         self.functions.insert(func.name.clone(), func.clone());
                     }
                 }
-                Item::Shader(_) => {
-                    // Shaders are validated during codegen (file existence, compilation)
+                Item::Shader(shader) => {
+                    // Validate that shader stage matches file extension
+                    self.validate_shader_stage(shader)?;
                 }
             }
         }
@@ -271,6 +272,59 @@ impl TypeChecker {
                 }
             }
         }
+        Ok(())
+    }
+    
+    fn validate_shader_stage(&mut self, shader: &ShaderDef) -> Result<()> {
+        use crate::ast::ShaderStage;
+        
+        // Determine expected extension based on stage
+        let expected_ext = match shader.stage {
+            ShaderStage::Vertex => ".vert",
+            ShaderStage::Fragment => ".frag",
+            ShaderStage::Compute => ".comp",
+            ShaderStage::Geometry => ".geom",
+            ShaderStage::TessellationControl => ".tesc",
+            ShaderStage::TessellationEvaluation => ".tese",
+        };
+        
+        // Check if path ends with expected extension
+        let path_lower = shader.path.to_lowercase();
+        let has_correct_ext = path_lower.ends_with(expected_ext);
+        
+        // Also check for .spv (compiled shader) - that's okay too
+        let is_spv = path_lower.ends_with(".spv");
+        
+        // Allow .glsl extension (generic) - no validation in that case
+        let is_generic = path_lower.ends_with(".glsl");
+        
+        if !has_correct_ext && !is_spv && !is_generic {
+            let location = SourceLocation::unknown(); // TODO: get from AST
+            let stage_name = match shader.stage {
+                ShaderStage::Vertex => "vertex",
+                ShaderStage::Fragment => "fragment",
+                ShaderStage::Compute => "compute",
+                ShaderStage::Geometry => "geometry",
+                ShaderStage::TessellationControl => "tessellation_control",
+                ShaderStage::TessellationEvaluation => "tessellation_evaluation",
+            };
+            
+            self.report_error(
+                location,
+                format!(
+                    "Shader stage '{}' does not match file extension. Expected '{}' extension for {} shader, but got '{}'",
+                    stage_name,
+                    expected_ext,
+                    stage_name,
+                    shader.path
+                ),
+                Some(format!(
+                    "Change the file path to end with '{}' or use a .glsl extension for generic shaders",
+                    expected_ext
+                )),
+            );
+        }
+        
         Ok(())
     }
     
