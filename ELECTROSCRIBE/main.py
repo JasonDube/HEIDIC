@@ -157,6 +157,12 @@ class Editor:
         self._log_h_drag_offset = 0
         self.log_copy_btn_rect = pygame.Rect(MARGIN, (LOG_HEADER_HEIGHT - 22) // 2, LOG_COPY_BTN_WIDTH, 22)
         self.menu_hovered_action = None  # For tooltip display
+        # MMB scrolling state
+        self.mmb_dragging_editor = False
+        self.mmb_dragging_log = False
+        self.mmb_dragging_terminal = False
+        self.mmb_drag_start_y = 0
+        self.mmb_drag_start_scroll = 0
         self.view_mode = "hd"  # "hd", "cpp", or "shader"
         self.viewing_hd = True  # Deprecated: kept for compatibility, use view_mode instead
         self.current_shader_path = None  # Path to currently loaded shader
@@ -211,6 +217,116 @@ class Editor:
     def _text_area_width(self, has_vscroll):
         # Width available for text content, accounting for line numbers, margins, and vertical scrollbar if present
         return EDITOR_WIDTH - self.line_number_width - (MARGIN * 2) - (self.scrollbar_width if has_vscroll else 0) - MARGIN
+    
+    def _draw_text_panel(self, surface, lines, header_color, header_text, header_y, panel_height, 
+                         vscroll, hscroll, v_sb, h_sb, copy_btn_rect, copy_btn_color):
+        """Draw a text panel (log or terminal) with header, content, scrollbars, and copy button.
+        
+        Args:
+            surface: pygame.Surface to draw on
+            lines: List of text lines to display
+            header_color: Color for the header background
+            header_text: Text to display in header (or None to skip text)
+            header_y: Y position of header
+            panel_height: Total height of the panel
+            vscroll: Vertical scroll offset
+            hscroll: Horizontal scroll offset
+            v_sb: Vertical scrollbar data (from calc_*_vscrollbar)
+            h_sb: Horizontal scrollbar data (from calc_*_hscrollbar)
+            copy_btn_rect: pygame.Rect for copy button
+            copy_btn_color: Color for copy button
+        """
+        # Draw header
+        panel_width = surface.get_width()
+        pygame.draw.rect(surface, header_color, pygame.Rect(0, header_y, panel_width, LOG_HEADER_HEIGHT))
+        
+        # Draw copy button
+        pygame.draw.rect(surface, copy_btn_color, copy_btn_rect)
+        btn_text = self.font.render(">", True, (230, 230, 230))
+        btn_text_rect = btn_text.get_rect(center=copy_btn_rect.center)
+        surface.blit(btn_text, btn_text_rect)
+        
+        # Calculate usable area
+        line_height = self.font.get_linesize()
+        usable_height = panel_height - LOG_HEADER_HEIGHT - (MARGIN * 2) - (LOG_HSCROLL_HEIGHT if h_sb else 0)
+        usable_width = panel_width - (MARGIN * 2) - (LOG_SCROLLBAR_WIDTH if v_sb else 0)
+        
+        # Draw text lines
+        first_line = vscroll // line_height
+        max_lines = usable_height // line_height
+        max_y = header_y + panel_height - (LOG_HSCROLL_HEIGHT if h_sb else 0) - MARGIN
+        
+        for i in range(max_lines + 1):
+            idx = first_line + i
+            if idx >= len(lines):
+                break
+            text = lines[idx]
+            x = MARGIN - hscroll
+            y = header_y + LOG_HEADER_HEIGHT + MARGIN + i * line_height
+            if y + line_height > max_y:
+                break
+            # Render bold black text (render twice with slight offset for bold effect)
+            text_surf = self.font.render(text, True, (0, 0, 0))
+            surface.blit(text_surf, (x, y))
+            surface.blit(text_surf, (x + 1, y))  # Bold effect
+        
+        # Draw scrollbars
+        if v_sb:
+            v_sb_adjusted = v_sb.copy()
+            v_sb_adjusted["scrollbar_y"] = header_y + LOG_HEADER_HEIGHT + MARGIN
+            self._draw_scrollbar(surface, v_sb_adjusted, is_horizontal=False, scrollbar_width=LOG_SCROLLBAR_WIDTH)
+        self._draw_scrollbar(surface, h_sb, is_horizontal=True, scrollbar_width=LOG_HSCROLL_HEIGHT)
+    
+    def _draw_scrollbar(self, surface, scrollbar_data, is_horizontal=False, scrollbar_width=None):
+        """Draw a scrollbar (vertical or horizontal) on the given surface.
+        
+        Args:
+            surface: pygame.Surface to draw on
+            scrollbar_data: Dictionary with scrollbar geometry (from calc_*_scrollbar methods)
+            is_horizontal: If True, draw horizontal scrollbar; if False, draw vertical
+            scrollbar_width: Width for vertical scrollbar, or height for horizontal (uses defaults if None)
+        """
+        if not scrollbar_data:
+            return
+        
+        if is_horizontal:
+            width = scrollbar_width or LOG_HSCROLL_HEIGHT
+            track_rect = pygame.Rect(
+                scrollbar_data["track_x"],
+                scrollbar_data["track_y"],
+                scrollbar_data["usable_width"],
+                width,
+            )
+            thumb_rect = pygame.Rect(
+                scrollbar_data["track_x"] + scrollbar_data["bar_pos"],
+                scrollbar_data["track_y"],
+                scrollbar_data["bar_width"],
+                width,
+            )
+            pygame.draw.rect(surface, SCROLLBAR_BG, track_rect)
+            pygame.draw.rect(surface, SCROLLBAR_FG, thumb_rect)
+        else:
+            width = scrollbar_width or self.scrollbar_width
+            pygame.draw.rect(
+                surface,
+                SCROLLBAR_BG,
+                pygame.Rect(
+                    scrollbar_data["scrollbar_x"],
+                    scrollbar_data["scrollbar_y"],
+                    width,
+                    scrollbar_data["usable_height"],
+                ),
+            )
+            pygame.draw.rect(
+                surface,
+                SCROLLBAR_FG,
+                pygame.Rect(
+                    scrollbar_data["scrollbar_x"],
+                    scrollbar_data["scrollbar_y"] + scrollbar_data["bar_pos"],
+                    width,
+                    scrollbar_data["bar_height"],
+                ),
+            )
 
     def _load_file(self, path):
         if os.path.exists(path):
@@ -242,6 +358,55 @@ class Editor:
         max_scroll = max(0, (len(self.terminal_lines) * line_height) - 100)  # Approximate
         self.terminal_vscroll = max_scroll
 
+    def _copy_to_clipboard(self, text, success_message, empty_message):
+        """Copy text to clipboard with fallback methods. Updates editor status."""
+        if not text:
+            self.status = empty_message
+            return False
+        
+        # Use Windows clip command (most reliable on Windows)
+        try:
+            proc = subprocess.Popen(
+                'clip',
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            )
+            # Write text and close stdin
+            proc.stdin.write(text.encode('utf-8', errors='replace'))
+            proc.stdin.close()
+            proc.wait(timeout=2)
+            if proc.returncode == 0:
+                self.status = success_message
+                return True
+            else:
+                raise Exception(f"Clip command failed with code {proc.returncode}")
+        except Exception:
+            # Fallback to pyperclip if available, then tkinter
+            try:
+                import pyperclip
+                pyperclip.copy(text)
+                self.status = success_message
+                return True
+            except ImportError:
+                # Final fallback to tkinter
+                try:
+                    import tkinter as tk
+                    root = tk.Tk()
+                    root.withdraw()
+                    root.clipboard_clear()
+                    root.clipboard_append(text)
+                    root.update()
+                    # Keep root alive long enough for clipboard to update
+                    root.after(150, root.destroy)
+                    self.status = f"{success_message} (tkinter)"
+                    return True
+                except Exception as e:
+                    self.status = f"Copy failed: {str(e)}"
+                    return False
+    
     def save(self):
         # Save to current file (HD, C++, or shader)
         if self.view_mode == "shader" and self.current_shader_path:
@@ -958,14 +1123,10 @@ class Editor:
             self.menu_hitboxes.append((rect, icon_char, tooltip, action))
             x += MENU_BUTTON_SIZE + MENU_BUTTON_SPACING
 
-    def draw(self, screen):
-        screen.fill(SIDE_PANEL_COLOR)
-        editor_surface = pygame.Surface((EDITOR_WIDTH, EDITOR_HEIGHT))
-        editor_surface.fill(BG_COLOR)
-
-        # Menu bar
+    def _draw_menu_bar(self, surface):
+        """Draw the menu bar with icon buttons."""
         pygame.draw.rect(
-            editor_surface,
+            surface,
             MENU_BG_COLOR,
             pygame.Rect(0, 0, EDITOR_WIDTH, MENU_HEIGHT),
         )
@@ -994,14 +1155,14 @@ class Editor:
             
             # Button background (with hover effect)
             if is_disabled:
-                pygame.draw.rect(editor_surface, (40, 40, 40), rect)
-                pygame.draw.rect(editor_surface, (60, 60, 60), rect, 1)
+                pygame.draw.rect(surface, (40, 40, 40), rect)
+                pygame.draw.rect(surface, (60, 60, 60), rect, 1)
             elif self.menu_hovered_action == action:
-                pygame.draw.rect(editor_surface, (60, 60, 60), rect)
-                pygame.draw.rect(editor_surface, (100, 150, 255), rect, 2)
+                pygame.draw.rect(surface, (60, 60, 60), rect)
+                pygame.draw.rect(surface, (100, 150, 255), rect, 2)
             else:
-                pygame.draw.rect(editor_surface, (45, 45, 45), rect)
-                pygame.draw.rect(editor_surface, (70, 70, 70), rect, 1)
+                pygame.draw.rect(surface, (45, 45, 45), rect)
+                pygame.draw.rect(surface, (70, 70, 70), rect, 1)
             
             # Draw icon based on action
             center_x = rect.x + rect.width // 2
@@ -1010,37 +1171,37 @@ class Editor:
             
             if action == "new":
                 # Plus sign
-                pygame.draw.line(editor_surface, icon_color, (center_x - 8, center_y), (center_x + 8, center_y), 2)
-                pygame.draw.line(editor_surface, icon_color, (center_x, center_y - 8), (center_x, center_y + 8), 2)
+                pygame.draw.line(surface, icon_color, (center_x - 8, center_y), (center_x + 8, center_y), 2)
+                pygame.draw.line(surface, icon_color, (center_x, center_y - 8), (center_x, center_y + 8), 2)
             elif action == "load":
                 # Folder icon (simple)
                 folder_rect = pygame.Rect(center_x - 10, center_y - 6, 12, 8)
-                pygame.draw.rect(editor_surface, icon_color, folder_rect, 2)
-                pygame.draw.line(editor_surface, icon_color, (center_x - 8, center_y - 6), (center_x - 8, center_y - 2), 2)
+                pygame.draw.rect(surface, icon_color, folder_rect, 2)
+                pygame.draw.line(surface, icon_color, (center_x - 8, center_y - 6), (center_x - 8, center_y - 2), 2)
             elif action == "save":
                 # Disk icon (circle with line)
-                pygame.draw.circle(editor_surface, icon_color, (center_x, center_y - 2), 6, 2)
-                pygame.draw.line(editor_surface, icon_color, (center_x, center_y + 4), (center_x, center_y + 8), 2)
+                pygame.draw.circle(surface, icon_color, (center_x, center_y - 2), 6, 2)
+                pygame.draw.line(surface, icon_color, (center_x, center_y + 4), (center_x, center_y + 8), 2)
             elif action == "run":
                 # Play triangle
                 points = [(center_x - 6, center_y - 6), (center_x - 6, center_y + 6), (center_x + 6, center_y)]
-                pygame.draw.polygon(editor_surface, icon_color, points)
+                pygame.draw.polygon(surface, icon_color, points)
             elif action == "hotload":
                 # Red arrow (right-pointing triangle in red)
                 arrow_color = (255, 80, 80) if not is_disabled else (150, 150, 150)
                 points = [(center_x - 6, center_y - 6), (center_x - 6, center_y + 6), (center_x + 6, center_y)]
-                pygame.draw.polygon(editor_surface, arrow_color, points)
+                pygame.draw.polygon(surface, arrow_color, points)
             elif action == "compile_shaders":
                 # Blue arrow for shader compilation
                 arrow_color = (80, 120, 255) if not is_disabled else (150, 150, 150)
                 points = [(center_x - 6, center_y - 6), (center_x - 6, center_y + 6), (center_x + 6, center_y)]
-                pygame.draw.polygon(editor_surface, arrow_color, points)
+                pygame.draw.polygon(surface, arrow_color, points)
             elif action == "load_shader":
                 # Shader icon (simple "S")
                 shader_surf = icon_font.render("S", True, icon_color)
                 shader_x = center_x - shader_surf.get_width() // 2
                 shader_y = center_y - shader_surf.get_height() // 2
-                editor_surface.blit(shader_surf, (shader_x, shader_y))
+                surface.blit(shader_surf, (shader_x, shader_y))
             elif action == "cpp":
                 # Show current view: "HD", "C++", or "SD"
                 if self.view_mode == "hd":
@@ -1054,44 +1215,18 @@ class Editor:
                 cpp_surf = icon_font.render(btn_text, True, icon_color)
                 cpp_x = center_x - cpp_surf.get_width() // 2
                 cpp_y = center_y - cpp_surf.get_height() // 2
-                editor_surface.blit(cpp_surf, (cpp_x, cpp_y))
+                surface.blit(cpp_surf, (cpp_x, cpp_y))
             elif action == "reload":
                 # Circular arrow (simplified - just a circle with arrow)
-                pygame.draw.circle(editor_surface, icon_color, (center_x, center_y), 8, 2)
-                pygame.draw.line(editor_surface, icon_color, (center_x + 6, center_y - 4), (center_x + 8, center_y - 6), 2)
+                pygame.draw.circle(surface, icon_color, (center_x, center_y), 8, 2)
+                pygame.draw.line(surface, icon_color, (center_x + 6, center_y - 4), (center_x + 8, center_y - 6), 2)
             elif action == "quit":
                 # X mark
-                pygame.draw.line(editor_surface, icon_color, (center_x - 6, center_y - 6), (center_x + 6, center_y + 6), 2)
-                pygame.draw.line(editor_surface, icon_color, (center_x + 6, center_y - 6), (center_x - 6, center_y + 6), 2)
-        
-        # Tooltip (if hovering)
-        if self.menu_hovered_action:
-            for rect, icon_char, tooltip, action in self.menu_hitboxes:
-                if action == self.menu_hovered_action:
-                    # Dynamic tooltip for view toggle button
-                    if action == "cpp":
-                        if self.view_mode == "hd":
-                            tooltip_text = "View C++"
-                        elif self.view_mode == "cpp":
-                            tooltip_text = "View Shader"
-                        elif self.view_mode == "shader":
-                            tooltip_text = "View HEIDIC"
-                        else:
-                            tooltip_text = "Toggle View"
-                    else:
-                        tooltip_text = tooltip
-                    tooltip_surf = self.font.render(tooltip_text, True, (240, 240, 240))
-                    tooltip_bg = pygame.Surface((tooltip_surf.get_width() + 8, tooltip_surf.get_height() + 4))
-                    tooltip_bg.fill((50, 50, 50))
-                    tooltip_bg.set_alpha(240)
-                    tooltip_x = rect.x
-                    tooltip_y = rect.bottom + 4
-                    if tooltip_y + tooltip_bg.get_height() > MENU_HEIGHT + 30:
-                        tooltip_y = rect.top - tooltip_bg.get_height() - 4
-                    editor_surface.blit(tooltip_bg, (tooltip_x, tooltip_y))
-                    editor_surface.blit(tooltip_surf, (tooltip_x + 4, tooltip_y + 2))
-                    break
-        
+                pygame.draw.line(surface, icon_color, (center_x - 6, center_y - 6), (center_x + 6, center_y + 6), 2)
+                pygame.draw.line(surface, icon_color, (center_x + 6, center_y - 6), (center_x - 6, center_y + 6), 2)
+    
+    def _draw_editor_content(self, surface):
+        """Draw the editor text content with syntax highlighting and cursor."""
         text_area_height = self._text_area_height()
         text_area_start_y = MENU_HEIGHT + MARGIN
         line_height = self.font.get_linesize()
@@ -1108,7 +1243,7 @@ class Editor:
             # Line number
             ln_text = str(idx + 1)
             ln_surf = self.line_font.render(ln_text, True, (140, 140, 140))
-            editor_surface.blit(
+            surface.blit(
                 ln_surf,
                 (
                     MARGIN,
@@ -1130,7 +1265,7 @@ class Editor:
                 seg_surf = self.font.render(segment, True, seg_color)
                 # Only draw if segment is visible horizontally
                 if x_cursor + seg_surf.get_width() >= MARGIN + self.line_number_width - self.hscroll:
-                    editor_surface.blit(seg_surf, (x_cursor, y))
+                    surface.blit(seg_surf, (x_cursor, y))
                 x_cursor += seg_surf.get_width()
 
         # Draw cursor
@@ -1138,57 +1273,83 @@ class Editor:
         if text_area_start_y <= cursor_px_y < text_area_start_y + text_area_height:
             cursor_px_x = self.font.size(self.lines[self.cursor_y][: self.cursor_x])[0] + MARGIN + self.line_number_width - self.hscroll
             pygame.draw.line(
-                editor_surface,
+                surface,
                 CURSOR_COLOR,
                 (cursor_px_x, cursor_px_y),
                 (cursor_px_x, cursor_px_y + line_height - 2),
                 2,
             )
-
-        # Status bar
+    
+    def _draw_status_bar(self, surface):
+        """Draw the status bar at the bottom of the editor."""
         pygame.draw.rect(
-            editor_surface,
+            surface,
             STATUS_COLOR,
             pygame.Rect(0, EDITOR_HEIGHT - STATUS_HEIGHT, EDITOR_WIDTH, STATUS_HEIGHT),
         )
         status_text = self.font.render(self.status, True, FG_COLOR)
-        editor_surface.blit(status_text, (MARGIN, EDITOR_HEIGHT - STATUS_HEIGHT + 4))
+        surface.blit(status_text, (MARGIN, EDITOR_HEIGHT - STATUS_HEIGHT + 4))
+    
+    def _draw_side_panel(self, screen):
+        """Draw the side panel with log and terminal sections."""
+        panel_width = SCREEN_WIDTH - EDITOR_WIDTH
+        panel_surface = pygame.Surface((panel_width, SCREEN_HEIGHT))
+        panel_surface.fill(SIDE_PANEL_COLOR)
+        
+        # Split panel in half
+        log_height = SCREEN_HEIGHT // 2
+        terminal_height = SCREEN_HEIGHT - log_height
+        terminal_y = log_height
+        
+        # === LOG SECTION (top half) ===
+        v_sb = self.calc_log_vscrollbar(panel_width, log_height)
+        h_sb = self.calc_log_hscrollbar(panel_width, log_height, 0)
+        self._draw_text_panel(
+            panel_surface, self.log_lines, LOG_HEADER_COLOR, None, 0, log_height,
+            self.log_vscroll, self.log_hscroll, v_sb, h_sb,
+            self.log_copy_btn_rect, LOG_COPY_BTN_COLOR
+        )
+        
+        # === TERMINAL SECTION (bottom half) ===
+        terminal_header_y = terminal_y
+        terminal_copy_btn = pygame.Rect(MARGIN, terminal_header_y + (TERMINAL_HEADER_HEIGHT - 22) // 2, TERMINAL_COPY_BTN_WIDTH, 22)
+        v_sb_term = self.calc_terminal_vscrollbar(panel_width, terminal_height)
+        h_sb_term = self.calc_terminal_hscrollbar(panel_width, terminal_height, terminal_y)
+        self._draw_text_panel(
+            panel_surface, self.terminal_lines, TERMINAL_HEADER_COLOR, None, terminal_header_y, terminal_height,
+            self.terminal_vscroll, self.terminal_hscroll, v_sb_term, h_sb_term,
+            terminal_copy_btn, TERMINAL_COPY_BTN_COLOR
+        )
+        
+        screen.blit(panel_surface, (0, 0))
+    
+    def draw(self, screen):
+        """Main draw method that orchestrates all drawing operations."""
+        screen.fill(SIDE_PANEL_COLOR)
+        editor_surface = pygame.Surface((EDITOR_WIDTH, EDITOR_HEIGHT))
+        editor_surface.fill(BG_COLOR)
 
-        # Scrollbar
+        # Draw menu bar
+        self._draw_menu_bar(editor_surface)
+        
+        # Draw editor content
+        self._draw_editor_content(editor_surface)
+        
+        # Draw status bar
+        self._draw_status_bar(editor_surface)
+        
+        # Draw scrollbars
         sb = self.calc_scrollbar()
-        if sb:
-            pygame.draw.rect(
-                editor_surface,
-                SCROLLBAR_BG,
-                pygame.Rect(sb["scrollbar_x"], sb["scrollbar_y"], self.scrollbar_width, sb["usable_height"]),
-            )
-            pygame.draw.rect(
-                editor_surface,
-                SCROLLBAR_FG,
-                pygame.Rect(sb["scrollbar_x"], sb["scrollbar_y"] + sb["bar_pos"], self.scrollbar_width, sb["bar_height"]),
-            )
-
-        # Horizontal scrollbar
+        self._draw_scrollbar(editor_surface, sb, is_horizontal=False)
         hsb = self.calc_hscrollbar()
-        if hsb:
-            track_rect = pygame.Rect(
-                hsb["track_x"],
-                hsb["track_y"],
-                hsb["usable_width"],
-                HSCROLLBAR_HEIGHT,
-            )
-            pygame.draw.rect(editor_surface, SCROLLBAR_BG, track_rect)
-            thumb_rect = pygame.Rect(
-                hsb["track_x"] + hsb["bar_pos"],
-                hsb["track_y"],
-                hsb["bar_width"],
-                HSCROLLBAR_HEIGHT,
-            )
-            pygame.draw.rect(editor_surface, SCROLLBAR_FG, thumb_rect)
+        self._draw_scrollbar(editor_surface, hsb, is_horizontal=True, scrollbar_width=HSCROLLBAR_HEIGHT)
 
         # Right-justify editor; left side is side panel
         offset_x = SCREEN_WIDTH - EDITOR_WIDTH
         screen.blit(editor_surface, (offset_x, 0))
+        
+        # Draw side panel
+        self._draw_side_panel(screen)
 
         # Left panel: split into log (top) and terminal (bottom) halves
         panel_width = SCREEN_WIDTH - EDITOR_WIDTH
@@ -1203,129 +1364,24 @@ class Editor:
         # Terminal is read-only, no processing needed
         
         # === LOG SECTION (top half) ===
-        pygame.draw.rect(panel_surface, LOG_HEADER_COLOR, pygame.Rect(0, 0, panel_width, LOG_HEADER_HEIGHT))
-        # Copy button
-        pygame.draw.rect(panel_surface, LOG_COPY_BTN_COLOR, self.log_copy_btn_rect)
-        btn_text = self.font.render(">", True, (230, 230, 230))
-        btn_text_rect = btn_text.get_rect(center=self.log_copy_btn_rect.center)
-        panel_surface.blit(btn_text, btn_text_rect)
-        line_height = self.font.get_linesize()
         v_sb = self.calc_log_vscrollbar(panel_width, log_height)
         h_sb = self.calc_log_hscrollbar(panel_width, log_height, 0)
-        usable_height = log_height - LOG_HEADER_HEIGHT - (MARGIN * 2) - (LOG_HSCROLL_HEIGHT if h_sb else 0)
-        usable_width = panel_width - (MARGIN * 2) - (LOG_SCROLLBAR_WIDTH if v_sb else 0)
-
-        first_line = self.log_vscroll // line_height
-        max_lines = usable_height // line_height
-        # Calculate max Y position to avoid drawing past horizontal scrollbar
-        log_max_y = log_height - (LOG_HSCROLL_HEIGHT if h_sb else 0) - MARGIN
-        for i in range(max_lines + 1):
-            idx = first_line + i
-            if idx >= len(self.log_lines):
-                break
-            text = self.log_lines[idx]
-            x = MARGIN - self.log_hscroll
-            y = LOG_HEADER_HEIGHT + MARGIN + i * line_height
-            # Don't draw if past the horizontal scrollbar
-            if y + line_height > log_max_y:
-                break
-            # Render bold black text (render twice with slight offset for bold effect)
-            text_surf = self.font.render(text, True, (0, 0, 0))
-            panel_surface.blit(text_surf, (x, y))
-            # Render again with slight offset for bold effect
-            panel_surface.blit(text_surf, (x + 1, y))
-
-        # Draw log scrollbars
-        if v_sb:
-            pygame.draw.rect(
-                panel_surface,
-                SCROLLBAR_BG,
-                pygame.Rect(v_sb["scrollbar_x"], v_sb["scrollbar_y"], LOG_SCROLLBAR_WIDTH, v_sb["usable_height"]),
-            )
-            pygame.draw.rect(
-                panel_surface,
-                SCROLLBAR_FG,
-                pygame.Rect(v_sb["scrollbar_x"], v_sb["scrollbar_y"] + v_sb["bar_pos"], LOG_SCROLLBAR_WIDTH, v_sb["bar_height"]),
-            )
-        if h_sb:
-            track_rect = pygame.Rect(
-                h_sb["track_x"],
-                h_sb["track_y"],
-                h_sb["usable_width"],
-                LOG_HSCROLL_HEIGHT,
-            )
-            pygame.draw.rect(panel_surface, SCROLLBAR_BG, track_rect)
-            thumb_rect = pygame.Rect(
-                h_sb["track_x"] + h_sb["bar_pos"],
-                h_sb["track_y"],
-                h_sb["bar_width"],
-                LOG_HSCROLL_HEIGHT,
-            )
-            pygame.draw.rect(panel_surface, SCROLLBAR_FG, thumb_rect)
+        self._draw_text_panel(
+            panel_surface, self.log_lines, LOG_HEADER_COLOR, None, 0, log_height,
+            self.log_vscroll, self.log_hscroll, v_sb, h_sb,
+            self.log_copy_btn_rect, LOG_COPY_BTN_COLOR
+        )
 
         # === TERMINAL SECTION (bottom half) ===
         terminal_header_y = terminal_y
-        pygame.draw.rect(panel_surface, TERMINAL_HEADER_COLOR, pygame.Rect(0, terminal_header_y, panel_width, TERMINAL_HEADER_HEIGHT))
-        # Terminal copy button
         terminal_copy_btn = pygame.Rect(MARGIN, terminal_header_y + (TERMINAL_HEADER_HEIGHT - 22) // 2, TERMINAL_COPY_BTN_WIDTH, 22)
-        pygame.draw.rect(panel_surface, TERMINAL_COPY_BTN_COLOR, terminal_copy_btn)
-        btn_text = self.font.render(">", True, (230, 230, 230))
-        btn_text_rect = btn_text.get_rect(center=terminal_copy_btn.center)
-        panel_surface.blit(btn_text, btn_text_rect)
-        
         v_sb_term = self.calc_terminal_vscrollbar(panel_width, terminal_height)
         h_sb_term = self.calc_terminal_hscrollbar(panel_width, terminal_height, terminal_y)
-        term_usable_height = terminal_height - TERMINAL_HEADER_HEIGHT - (MARGIN * 2) - (LOG_HSCROLL_HEIGHT if h_sb_term else 0)
-        term_usable_width = panel_width - (MARGIN * 2) - (LOG_SCROLLBAR_WIDTH if v_sb_term else 0)
-
-        first_line_term = self.terminal_vscroll // line_height
-        max_lines_term = term_usable_height // line_height
-        # Calculate max Y position to avoid drawing past horizontal scrollbar
-        max_y = terminal_header_y + terminal_height - (LOG_HSCROLL_HEIGHT if h_sb_term else 0) - MARGIN
-        for i in range(max_lines_term + 1):
-            idx = first_line_term + i
-            if idx >= len(self.terminal_lines):
-                break
-            text = self.terminal_lines[idx]
-            x = MARGIN - self.terminal_hscroll
-            y = terminal_header_y + TERMINAL_HEADER_HEIGHT + MARGIN + i * line_height
-            # Don't draw if past the horizontal scrollbar
-            if y + line_height > max_y:
-                break
-            # Render bold black text (render twice with slight offset for bold effect)
-            text_surf = self.font.render(text, True, (0, 0, 0))
-            panel_surface.blit(text_surf, (x, y))
-            # Render again with slight offset for bold effect
-            panel_surface.blit(text_surf, (x + 1, y))
-
-        # Draw terminal scrollbars
-        if v_sb_term:
-            scrollbar_y_pos = terminal_header_y + TERMINAL_HEADER_HEIGHT + MARGIN
-            pygame.draw.rect(
-                panel_surface,
-                SCROLLBAR_BG,
-                pygame.Rect(v_sb_term["scrollbar_x"], scrollbar_y_pos, LOG_SCROLLBAR_WIDTH, v_sb_term["usable_height"]),
-            )
-            pygame.draw.rect(
-                panel_surface,
-                SCROLLBAR_FG,
-                pygame.Rect(v_sb_term["scrollbar_x"], scrollbar_y_pos + v_sb_term["bar_pos"], LOG_SCROLLBAR_WIDTH, v_sb_term["bar_height"]),
-            )
-        if h_sb_term:
-            track_rect = pygame.Rect(
-                h_sb_term["track_x"],
-                h_sb_term["track_y"],
-                h_sb_term["usable_width"],
-                LOG_HSCROLL_HEIGHT,
-            )
-            pygame.draw.rect(panel_surface, SCROLLBAR_BG, track_rect)
-            thumb_rect = pygame.Rect(
-                h_sb_term["track_x"] + h_sb_term["bar_pos"],
-                h_sb_term["track_y"],
-                h_sb_term["bar_width"],
-                LOG_HSCROLL_HEIGHT,
-            )
-            pygame.draw.rect(panel_surface, SCROLLBAR_FG, thumb_rect)
+        self._draw_text_panel(
+            panel_surface, self.terminal_lines, TERMINAL_HEADER_COLOR, None, terminal_header_y, terminal_height,
+            self.terminal_vscroll, self.terminal_hscroll, v_sb_term, h_sb_term,
+            terminal_copy_btn, TERMINAL_COPY_BTN_COLOR
+        )
 
         screen.blit(panel_surface, (0, 0))
 
@@ -2507,8 +2563,17 @@ def project_picker_dialog(screen, editor):
     
     selected_idx = 0
     scroll_offset = 0
-    items_per_page = 20
     item_height = 24
+    scrollbar_width = 12
+    list_area_height = dialog_height - 80
+    items_per_page = list_area_height // item_height
+    
+    # Scrollbar state
+    dragging_scrollbar = False
+    scrollbar_drag_offset = 0
+    last_click_time = 0
+    last_click_idx = -1
+    
     clock = pygame.time.Clock()
     
     running = True
@@ -2536,6 +2601,84 @@ def project_picker_dialog(screen, editor):
                 elif event.key == pygame.K_PAGEDOWN:
                     selected_idx = min(len(projects) - 1, selected_idx + items_per_page)
                     scroll_offset = min(max(0, len(projects) - items_per_page), scroll_offset + items_per_page)
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                mx, my = event.pos
+                # Convert to dialog coordinates
+                dlg_x = mx - dialog_x
+                dlg_y = my - dialog_y
+                
+                # Check if click is in list area
+                list_rect = pygame.Rect(10, 40, dialog_width - 20 - scrollbar_width, list_area_height)
+                scrollbar_rect = pygame.Rect(dialog_width - 10 - scrollbar_width, 40, scrollbar_width, list_area_height)
+                
+                if list_rect.collidepoint(dlg_x, dlg_y):
+                    # Click on a project item
+                    click_y = dlg_y - list_rect.y - 5
+                    clicked_idx = scroll_offset + (click_y // item_height)
+                    if 0 <= clicked_idx < len(projects):
+                        # Check for double-click
+                        current_time = pygame.time.get_ticks()
+                        if clicked_idx == last_click_idx and current_time - last_click_time < 500:  # 500ms double-click window
+                            return projects[clicked_idx][1]  # Load project on double-click
+                        last_click_time = current_time
+                        last_click_idx = clicked_idx
+                        selected_idx = clicked_idx
+                elif scrollbar_rect.collidepoint(dlg_x, dlg_y) and len(projects) > items_per_page:
+                    # Click on scrollbar
+                    if event.button == 1:  # Left click
+                        # Calculate scrollbar thumb position
+                        total_items = len(projects)
+                        max_scroll = max(0, total_items - items_per_page)
+                        usable_height = list_area_height
+                        thumb_height = max(20, int((items_per_page / total_items) * usable_height))
+                        max_thumb_pos = usable_height - thumb_height
+                        current_thumb_pos = int((scroll_offset / max_scroll) * max_thumb_pos) if max_scroll > 0 else 0
+                        
+                        thumb_rect = pygame.Rect(
+                            scrollbar_rect.x,
+                            scrollbar_rect.y + current_thumb_pos,
+                            scrollbar_width,
+                            thumb_height
+                        )
+                        
+                        if thumb_rect.collidepoint(dlg_x, dlg_y):
+                            dragging_scrollbar = True
+                            scrollbar_drag_offset = dlg_y - (scrollbar_rect.y + current_thumb_pos)
+                        else:
+                            # Click on scrollbar track - jump to position
+                            rel_y = dlg_y - scrollbar_rect.y
+                            target_pos = max(0, min(max_thumb_pos, rel_y - thumb_height // 2))
+                            if max_thumb_pos > 0:
+                                scroll_offset = int((target_pos / max_thumb_pos) * max_scroll)
+                            else:
+                                scroll_offset = 0
+                            selected_idx = min(len(projects) - 1, scroll_offset + items_per_page // 2)
+            elif event.type == pygame.MOUSEBUTTONUP:
+                if event.button == 1:
+                    dragging_scrollbar = False
+            elif event.type == pygame.MOUSEMOTION:
+                if dragging_scrollbar:
+                    mx, my = event.pos
+                    dlg_y = my - dialog_y
+                    scrollbar_rect = pygame.Rect(dialog_width - 10 - scrollbar_width, 40, scrollbar_width, list_area_height)
+                    
+                    total_items = len(projects)
+                    max_scroll = max(0, total_items - items_per_page)
+                    usable_height = list_area_height
+                    thumb_height = max(20, int((items_per_page / total_items) * usable_height))
+                    max_thumb_pos = usable_height - thumb_height
+                    
+                    rel_y = dlg_y - scrollbar_rect.y - scrollbar_drag_offset
+                    target_pos = max(0, min(max_thumb_pos, rel_y))
+                    if max_thumb_pos > 0:
+                        scroll_offset = int((target_pos / max_thumb_pos) * max_scroll)
+                    else:
+                        scroll_offset = 0
+                    # Keep selected item visible
+                    if selected_idx < scroll_offset:
+                        selected_idx = scroll_offset
+                    elif selected_idx >= scroll_offset + items_per_page:
+                        selected_idx = scroll_offset + items_per_page - 1
         
         # Redraw editor background
         editor.draw(screen)
@@ -2555,12 +2698,12 @@ def project_picker_dialog(screen, editor):
         title_surf = font.render("Load Project from PROJECTS folder:", True, (240, 240, 240))
         dialog_surface.blit(title_surf, (10, 10))
         
-        # List area
-        list_rect = pygame.Rect(10, 40, dialog_width - 20, dialog_height - 80)
+        # List area (with space for scrollbar)
+        list_rect = pygame.Rect(10, 40, dialog_width - 20 - scrollbar_width, list_area_height)
         pygame.draw.rect(dialog_surface, (30, 30, 30), list_rect)
         pygame.draw.rect(dialog_surface, (100, 150, 255), list_rect, 2)
         
-        # Draw projects list
+        # Draw projects list (only visible items, respecting scrollbar space)
         visible_start = scroll_offset
         visible_end = min(len(projects), scroll_offset + items_per_page)
         for i in range(visible_start, visible_end):
@@ -2573,12 +2716,43 @@ def project_picker_dialog(screen, editor):
                 highlight_rect = pygame.Rect(list_rect.x + 2, y_pos - 2, list_rect.width - 4, item_height)
                 pygame.draw.rect(dialog_surface, (70, 130, 200), highlight_rect)
             
-            # Project name
+            # Project name (clip if too long to avoid going behind scrollbar)
             text_surf = font.render(rel_path, True, (240, 240, 240))
+            # Clip text if it would go past the scrollbar
+            max_text_width = list_rect.width - 10
+            if text_surf.get_width() > max_text_width:
+                # Truncate text with ellipsis
+                truncated = rel_path
+                while font.size(truncated + "...")[0] > max_text_width and len(truncated) > 0:
+                    truncated = truncated[:-1]
+                if truncated != rel_path:
+                    truncated += "..."
+                text_surf = font.render(truncated, True, (240, 240, 240))
             dialog_surface.blit(text_surf, (list_rect.x + 5, y_pos))
         
+        # Draw scrollbar if needed
+        if len(projects) > items_per_page:
+            scrollbar_rect = pygame.Rect(dialog_width - 10 - scrollbar_width, 40, scrollbar_width, list_area_height)
+            pygame.draw.rect(dialog_surface, SCROLLBAR_BG, scrollbar_rect)
+            
+            # Calculate thumb size and position
+            total_items = len(projects)
+            max_scroll = max(0, total_items - items_per_page)
+            usable_height = list_area_height
+            thumb_height = max(20, int((items_per_page / total_items) * usable_height))
+            max_thumb_pos = usable_height - thumb_height
+            current_thumb_pos = int((scroll_offset / max_scroll) * max_thumb_pos) if max_scroll > 0 else 0
+            
+            thumb_rect = pygame.Rect(
+                scrollbar_rect.x,
+                scrollbar_rect.y + current_thumb_pos,
+                scrollbar_width,
+                thumb_height
+            )
+            pygame.draw.rect(dialog_surface, SCROLLBAR_FG, thumb_rect)
+        
         # Instructions
-        hint_surf = font.render("↑↓: Select | Enter: Load | Esc: Cancel", True, (150, 150, 150))
+        hint_surf = font.render("↑↓: Select | Enter/Double-click: Load | Esc: Cancel", True, (150, 150, 150))
         dialog_surface.blit(hint_surf, (10, dialog_height - 30))
         
         screen.blit(dialog_surface, (dialog_x, dialog_y))
@@ -2714,214 +2888,135 @@ def main():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
-            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            elif event.type == pygame.MOUSEBUTTONDOWN:
                 mx, my = event.pos
                 offset_x = SCREEN_WIDTH - EDITOR_WIDTH
                 local_x = mx - offset_x
                 local_y = my
-                # Left panel interactions (logs and terminal)
-                if mx < SCREEN_WIDTH - EDITOR_WIDTH:
-                    panel_width = SCREEN_WIDTH - EDITOR_WIDTH
-                    log_height = SCREEN_HEIGHT // 2
-                    terminal_height = SCREEN_HEIGHT - log_height
-                    terminal_y = log_height
-                    
-                    # Determine which section was clicked
-                    if my < log_height:
-                        # LOG SECTION
-                        v_sb = editor.calc_log_vscrollbar(panel_width, log_height)
-                        h_sb = editor.calc_log_hscrollbar(panel_width, log_height, 0)
-                        # Log copy button
-                        copy_btn_rect = editor.log_copy_btn_rect
-                        if copy_btn_rect.collidepoint(mx, my):
-                            try:
+                
+                # Left click handling (button 1)
+                if event.button == 1:
+                    # Left panel interactions (logs and terminal)
+                    if mx < SCREEN_WIDTH - EDITOR_WIDTH:
+                        panel_width = SCREEN_WIDTH - EDITOR_WIDTH
+                        log_height = SCREEN_HEIGHT // 2
+                        terminal_height = SCREEN_HEIGHT - log_height
+                        terminal_y = log_height
+                        
+                        # Determine which section was clicked
+                        if my < log_height:
+                            # LOG SECTION
+                            v_sb = editor.calc_log_vscrollbar(panel_width, log_height)
+                            h_sb = editor.calc_log_hscrollbar(panel_width, log_height, 0)
+                            # Log copy button
+                            copy_btn_rect = editor.log_copy_btn_rect
+                            if copy_btn_rect.collidepoint(mx, my):
                                 log_text = "\n".join(editor.log_lines) if editor.log_lines else ""
-                                if log_text:
-                                    # Use Windows clip command (most reliable on Windows)
-                                    try:
-                                        # Use shell=True and proper encoding
-                                        proc = subprocess.Popen(
-                                            'clip',
-                                            stdin=subprocess.PIPE,
-                                            stdout=subprocess.PIPE,
-                                            stderr=subprocess.PIPE,
-                                            shell=True,
-                                            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-                                        )
-                                        # Write text and close stdin
-                                        proc.stdin.write(log_text.encode('utf-8', errors='replace'))
-                                        proc.stdin.close()
-                                        proc.wait(timeout=2)
-                                        if proc.returncode == 0:
-                                            editor.status = "Copied log to clipboard"
-                                        else:
-                                            raise Exception(f"Clip command failed with code {proc.returncode}")
-                                    except Exception as clip_error:
-                                        # Fallback to pyperclip if available, then tkinter
-                                        try:
-                                            import pyperclip
-                                            pyperclip.copy(log_text)
-                                            editor.status = "Copied log to clipboard"
-                                        except ImportError:
-                                            # Final fallback to tkinter
-                                            import tkinter as tk
-                                            root = tk.Tk()
-                                            root.withdraw()
-                                            root.clipboard_clear()
-                                            root.clipboard_append(log_text)
-                                            root.update()
-                                            # Keep root alive long enough for clipboard to update
-                                            root.after(150, root.destroy)
-                                            editor.status = "Copied log to clipboard (tkinter)"
-                                else:
-                                    editor.status = "Log is empty"
-                            except Exception as e:
-                                editor.status = f"Copy failed: {str(e)}"
-                        # Log scrollbars
-                        if v_sb and LOG_HEADER_HEIGHT <= my < log_height:
-                            sb_rect = pygame.Rect(
-                                v_sb["scrollbar_x"],
-                                v_sb["scrollbar_y"],
-                                LOG_SCROLLBAR_WIDTH,
-                                v_sb["usable_height"],
-                            )
-                            bar_rect = pygame.Rect(
-                                sb_rect.x,
-                                sb_rect.y + v_sb["bar_pos"],
-                                sb_rect.w,
-                                v_sb["bar_height"],
-                            )
-                            if bar_rect.collidepoint(mx, my):
-                                editor.dragging_log_v = True
-                                editor._log_drag_offset = my - bar_rect.y
-                            elif sb_rect.collidepoint(mx, my):
-                                rel = my - sb_rect.y
-                                target = max(0, min(v_sb["usable_height"] - v_sb["bar_height"], rel - v_sb["bar_height"] // 2))
-                                if (v_sb["usable_height"] - v_sb["bar_height"]) > 0:
-                                    editor.log_vscroll = int((target / (v_sb["usable_height"] - v_sb["bar_height"])) * v_sb["max_scroll"])
-                                else:
-                                    editor.log_vscroll = 0
-                        if h_sb:
-                            hsb_rect = pygame.Rect(
-                                h_sb["track_x"],
-                                h_sb["track_y"],
-                                h_sb["usable_width"],
-                                LOG_HSCROLL_HEIGHT,
-                            )
-                            thumb_rect = pygame.Rect(
-                                h_sb["track_x"] + h_sb["bar_pos"],
-                                h_sb["track_y"],
-                                h_sb["bar_width"],
-                                LOG_HSCROLL_HEIGHT,
-                            )
-                            if thumb_rect.collidepoint(mx, my):
-                                editor.dragging_log_h = True
-                                editor._log_h_drag_offset = mx - thumb_rect.x
-                            elif hsb_rect.collidepoint(mx, my):
-                                rel = mx - hsb_rect.x
-                                target = max(0, min(h_sb["usable_width"] - h_sb["bar_width"], rel - h_sb["bar_width"] // 2))
-                                if (h_sb["usable_width"] - h_sb["bar_width"]) > 0:
-                                    editor.log_hscroll = int((target / (h_sb["usable_width"] - h_sb["bar_width"])) * h_sb["max_scroll"])
-                                else:
-                                    editor.log_hscroll = 0
-                    else:
-                        # TERMINAL SECTION (read-only output display)
-                        v_sb_term = editor.calc_terminal_vscrollbar(panel_width, terminal_height)
-                        h_sb_term = editor.calc_terminal_hscrollbar(panel_width, terminal_height, terminal_y)
-                        # Terminal copy button
-                        terminal_copy_btn = pygame.Rect(MARGIN, terminal_y + (TERMINAL_HEADER_HEIGHT - 22) // 2, TERMINAL_COPY_BTN_WIDTH, 22)
-                        if terminal_copy_btn.collidepoint(mx, my):
-                            try:
+                                editor._copy_to_clipboard(log_text, "Copied log to clipboard", "Log is empty")
+                            # Log scrollbars
+                            if v_sb and LOG_HEADER_HEIGHT <= my < log_height:
+                                sb_rect = pygame.Rect(
+                                    v_sb["scrollbar_x"],
+                                    v_sb["scrollbar_y"],
+                                    LOG_SCROLLBAR_WIDTH,
+                                    v_sb["usable_height"],
+                                )
+                                bar_rect = pygame.Rect(
+                                    sb_rect.x,
+                                    sb_rect.y + v_sb["bar_pos"],
+                                    sb_rect.w,
+                                    v_sb["bar_height"],
+                                )
+                                if bar_rect.collidepoint(mx, my):
+                                    editor.dragging_log_v = True
+                                    editor._log_drag_offset = my - bar_rect.y
+                                elif sb_rect.collidepoint(mx, my):
+                                    rel = my - sb_rect.y
+                                    target = max(0, min(v_sb["usable_height"] - v_sb["bar_height"], rel - v_sb["bar_height"] // 2))
+                                    if (v_sb["usable_height"] - v_sb["bar_height"]) > 0:
+                                        editor.log_vscroll = int((target / (v_sb["usable_height"] - v_sb["bar_height"])) * v_sb["max_scroll"])
+                                    else:
+                                        editor.log_vscroll = 0
+                            if h_sb:
+                                hsb_rect = pygame.Rect(
+                                    h_sb["track_x"],
+                                    h_sb["track_y"],
+                                    h_sb["usable_width"],
+                                    LOG_HSCROLL_HEIGHT,
+                                )
+                                thumb_rect = pygame.Rect(
+                                    h_sb["track_x"] + h_sb["bar_pos"],
+                                    h_sb["track_y"],
+                                    h_sb["bar_width"],
+                                    LOG_HSCROLL_HEIGHT,
+                                )
+                                if thumb_rect.collidepoint(mx, my):
+                                    editor.dragging_log_h = True
+                                    editor._log_h_drag_offset = mx - thumb_rect.x
+                                elif hsb_rect.collidepoint(mx, my):
+                                    rel = mx - hsb_rect.x
+                                    target = max(0, min(h_sb["usable_width"] - h_sb["bar_width"], rel - h_sb["bar_width"] // 2))
+                                    if (h_sb["usable_width"] - h_sb["bar_width"]) > 0:
+                                        editor.log_hscroll = int((target / (h_sb["usable_width"] - h_sb["bar_width"])) * h_sb["max_scroll"])
+                                    else:
+                                        editor.log_hscroll = 0
+                        else:
+                            # TERMINAL SECTION (read-only output display)
+                            v_sb_term = editor.calc_terminal_vscrollbar(panel_width, terminal_height)
+                            h_sb_term = editor.calc_terminal_hscrollbar(panel_width, terminal_height, terminal_y)
+                            # Terminal copy button
+                            terminal_copy_btn = pygame.Rect(MARGIN, terminal_y + (TERMINAL_HEADER_HEIGHT - 22) // 2, TERMINAL_COPY_BTN_WIDTH, 22)
+                            if terminal_copy_btn.collidepoint(mx, my):
                                 term_text = "\n".join(editor.terminal_lines) if editor.terminal_lines else ""
-                                if term_text:
-                                    # Use Windows clip command (most reliable on Windows)
-                                    try:
-                                        # Use shell=True and proper encoding
-                                        proc = subprocess.Popen(
-                                            'clip',
-                                            stdin=subprocess.PIPE,
-                                            stdout=subprocess.PIPE,
-                                            stderr=subprocess.PIPE,
-                                            shell=True,
-                                            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-                                        )
-                                        # Write text and close stdin
-                                        proc.stdin.write(term_text.encode('utf-8', errors='replace'))
-                                        proc.stdin.close()
-                                        proc.wait(timeout=2)
-                                        if proc.returncode == 0:
-                                            editor.status = "Copied terminal to clipboard"
-                                        else:
-                                            raise Exception(f"Clip command failed with code {proc.returncode}")
-                                    except Exception as clip_error:
-                                        # Fallback to pyperclip if available, then tkinter
-                                        try:
-                                            import pyperclip
-                                            pyperclip.copy(term_text)
-                                            editor.status = "Copied terminal to clipboard"
-                                        except ImportError:
-                                            # Final fallback to tkinter
-                                            import tkinter as tk
-                                            root = tk.Tk()
-                                            root.withdraw()
-                                            root.clipboard_clear()
-                                            root.clipboard_append(term_text)
-                                            root.update()
-                                            # Keep root alive long enough for clipboard to update
-                                            root.after(150, root.destroy)
-                                            editor.status = "Copied terminal to clipboard (tkinter)"
-                                else:
-                                    editor.status = "Terminal is empty"
-                            except Exception as e:
-                                editor.status = f"Copy failed: {str(e)}"
-                        # Terminal scrollbars
-                        if v_sb_term and terminal_y + TERMINAL_HEADER_HEIGHT <= my < SCREEN_HEIGHT:
-                            scrollbar_y_pos = terminal_y + TERMINAL_HEADER_HEIGHT + MARGIN
-                            sb_rect = pygame.Rect(
-                                v_sb_term["scrollbar_x"],
-                                scrollbar_y_pos,
-                                LOG_SCROLLBAR_WIDTH,
-                                v_sb_term["usable_height"],
-                            )
-                            bar_rect = pygame.Rect(
-                                sb_rect.x,
-                                sb_rect.y + v_sb_term["bar_pos"],
-                                sb_rect.w,
-                                v_sb_term["bar_height"],
-                            )
-                            if bar_rect.collidepoint(mx, my):
-                                editor.dragging_terminal_v = True
-                                editor._terminal_drag_offset = my - bar_rect.y
-                            elif sb_rect.collidepoint(mx, my):
-                                rel = my - sb_rect.y
-                                target = max(0, min(v_sb_term["usable_height"] - v_sb_term["bar_height"], rel - v_sb_term["bar_height"] // 2))
-                                if (v_sb_term["usable_height"] - v_sb_term["bar_height"]) > 0:
-                                    editor.terminal_vscroll = int((target / (v_sb_term["usable_height"] - v_sb_term["bar_height"])) * v_sb_term["max_scroll"])
-                                else:
-                                    editor.terminal_vscroll = 0
-                        if h_sb_term:
-                            hsb_rect = pygame.Rect(
-                                h_sb_term["track_x"],
-                                h_sb_term["track_y"],
-                                h_sb_term["usable_width"],
-                                LOG_HSCROLL_HEIGHT,
-                            )
-                            thumb_rect = pygame.Rect(
-                                hsb_rect.x + h_sb_term["bar_pos"],
-                                hsb_rect.y,
-                                h_sb_term["bar_width"],
-                                LOG_HSCROLL_HEIGHT,
-                            )
-                            if thumb_rect.collidepoint(mx, my):
-                                editor.dragging_terminal_h = True
-                                editor._terminal_h_drag_offset = mx - thumb_rect.x
-                            elif hsb_rect.collidepoint(mx, my):
-                                rel = mx - hsb_rect.x
-                                target = max(0, min(h_sb_term["usable_width"] - h_sb_term["bar_width"], rel - h_sb_term["bar_width"] // 2))
-                                if (h_sb_term["usable_width"] - h_sb_term["bar_width"]) > 0:
-                                    editor.terminal_hscroll = int((target / (h_sb_term["usable_width"] - h_sb_term["bar_width"])) * h_sb_term["max_scroll"])
-                                else:
-                                    editor.terminal_hscroll = 0
+                                editor._copy_to_clipboard(term_text, "Copied terminal to clipboard", "Terminal is empty")
+                            # Terminal scrollbars
+                            if v_sb_term and terminal_y + TERMINAL_HEADER_HEIGHT <= my < SCREEN_HEIGHT:
+                                scrollbar_y_pos = terminal_y + TERMINAL_HEADER_HEIGHT + MARGIN
+                                sb_rect = pygame.Rect(
+                                    v_sb_term["scrollbar_x"],
+                                    scrollbar_y_pos,
+                                    LOG_SCROLLBAR_WIDTH,
+                                    v_sb_term["usable_height"],
+                                )
+                                bar_rect = pygame.Rect(
+                                    sb_rect.x,
+                                    sb_rect.y + v_sb_term["bar_pos"],
+                                    sb_rect.w,
+                                    v_sb_term["bar_height"],
+                                )
+                                if bar_rect.collidepoint(mx, my):
+                                    editor.dragging_terminal_v = True
+                                    editor._terminal_drag_offset = my - bar_rect.y
+                                elif sb_rect.collidepoint(mx, my):
+                                    rel = my - sb_rect.y
+                                    target = max(0, min(v_sb_term["usable_height"] - v_sb_term["bar_height"], rel - v_sb_term["bar_height"] // 2))
+                                    if (v_sb_term["usable_height"] - v_sb_term["bar_height"]) > 0:
+                                        editor.terminal_vscroll = int((target / (v_sb_term["usable_height"] - v_sb_term["bar_height"])) * v_sb_term["max_scroll"])
+                                    else:
+                                        editor.terminal_vscroll = 0
+                            if h_sb_term:
+                                hsb_rect = pygame.Rect(
+                                    h_sb_term["track_x"],
+                                    h_sb_term["track_y"],
+                                    h_sb_term["usable_width"],
+                                    LOG_HSCROLL_HEIGHT,
+                                )
+                                thumb_rect = pygame.Rect(
+                                    hsb_rect.x + h_sb_term["bar_pos"],
+                                    hsb_rect.y,
+                                    h_sb_term["bar_width"],
+                                    LOG_HSCROLL_HEIGHT,
+                                )
+                                if thumb_rect.collidepoint(mx, my):
+                                    editor.dragging_terminal_h = True
+                                    editor._terminal_h_drag_offset = mx - thumb_rect.x
+                                elif hsb_rect.collidepoint(mx, my):
+                                    rel = mx - hsb_rect.x
+                                    target = max(0, min(h_sb_term["usable_width"] - h_sb_term["bar_width"], rel - h_sb_term["bar_width"] // 2))
+                                    if (h_sb_term["usable_width"] - h_sb_term["bar_width"]) > 0:
+                                        editor.terminal_hscroll = int((target / (h_sb_term["usable_width"] - h_sb_term["bar_width"])) * h_sb_term["max_scroll"])
+                                    else:
+                                        editor.terminal_hscroll = 0
                 if 0 <= local_y < MENU_HEIGHT and 0 <= local_x < EDITOR_WIDTH:
                     for rect, icon_char, tooltip, action in editor.menu_hitboxes:
                         if rect.collidepoint(local_x, local_y):
@@ -3520,16 +3615,8 @@ fn main(): void {{
                         rel = max(0, min(h_sb_term["usable_width"] - h_sb_term["bar_width"], rel))
                         editor.terminal_hscroll = int((rel / (h_sb_term["usable_width"] - h_sb_term["bar_width"])) * h_sb_term["max_scroll"]) if (h_sb_term["usable_width"] - h_sb_term["bar_width"]) > 0 else 0
                 else:
-                    # Check for menu button hover (for tooltips) only when not dragging
-                    offset_x = SCREEN_WIDTH - EDITOR_WIDTH
-                    local_x = mx - offset_x
-                    local_y = my
-                    editor.menu_hovered_action = None
-                    if 0 <= local_y < MENU_HEIGHT and 0 <= local_x < EDITOR_WIDTH:
-                        for rect, icon_char, tooltip, action in editor.menu_hitboxes:
-                            if rect.collidepoint(local_x, local_y):
-                                editor.menu_hovered_action = action
-                                break
+                    # Tooltips disabled - no hover detection needed
+                    pass
             elif event.type == pygame.KEYDOWN:
                 # Editor input handling (terminal is read-only)
                 if event.key == pygame.K_ESCAPE:
@@ -3554,8 +3641,39 @@ fn main(): void {{
                 editor.dragging_terminal_v = False
                 editor.dragging_terminal_h = False
             elif event.type == pygame.MOUSEWHEEL:
-                # Disable wheel scrolling globally
-                pass
+                # Mouse wheel scrolling for whatever panel the mouse is over
+                mx, my = pygame.mouse.get_pos()
+                offset_x = SCREEN_WIDTH - EDITOR_WIDTH
+                panel_width = SCREEN_WIDTH - EDITOR_WIDTH
+                log_height = SCREEN_HEIGHT // 2
+                terminal_y = log_height
+                
+                scroll_amount = event.y * 20  # Scroll speed multiplier
+                
+                # Determine which panel the mouse is over
+                if mx >= offset_x and mx < SCREEN_WIDTH:
+                    # Editor panel - scroll editor
+                    line_height = editor.font.get_linesize()
+                    usable_height = editor._text_area_height()
+                    total_height = len(editor.lines) * line_height
+                    max_scroll = max(0, total_height - usable_height)
+                    editor.scroll = max(0, min(max_scroll, editor.scroll - scroll_amount))
+                elif mx < panel_width:
+                    if my < log_height:
+                        # Log panel - scroll log
+                        line_height = editor.font.get_linesize()
+                        usable_height = log_height - LOG_HEADER_HEIGHT - (MARGIN * 2) - LOG_HSCROLL_HEIGHT
+                        total_height = len(editor.log_lines) * line_height
+                        max_scroll = max(0, total_height - usable_height)
+                        editor.log_vscroll = max(0, min(max_scroll, editor.log_vscroll - scroll_amount))
+                    else:
+                        # Terminal panel - scroll terminal
+                        terminal_height = SCREEN_HEIGHT - log_height
+                        line_height = editor.font.get_linesize()
+                        usable_height = terminal_height - TERMINAL_HEADER_HEIGHT - (MARGIN * 2) - LOG_HSCROLL_HEIGHT
+                        total_height = len(editor.terminal_lines) * line_height
+                        max_scroll = max(0, total_height - usable_height)
+                        editor.terminal_vscroll = max(0, min(max_scroll, editor.terminal_vscroll - scroll_amount))
 
         editor.draw(screen)
         pygame.display.flip()
