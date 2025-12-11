@@ -67,18 +67,18 @@ VkDeviceMemory g_triangleVertexBufferMemory = VK_NULL_HANDLE;
 bool g_usingCustomShaders = false; // Track if we're using custom shaders that need vertex buffers
 std::vector<VkFramebuffer> g_framebuffers;
 VkCommandPool g_commandPool = VK_NULL_HANDLE;
-std::vector<VkCommandBuffer> g_commandBuffers;
+std::vector<VkCommandBuffer> g_commandBuffers;  // Already non-static, accessible to NEUROSHELL
 VkQueue g_graphicsQueue = VK_NULL_HANDLE;
 static uint32_t g_graphicsQueueFamilyIndex = 0;
 static uint32_t g_currentFrame = 0;
-static VkExtent2D g_swapchainExtent = {};
+VkExtent2D g_swapchainExtent = {};  // Made non-static for NEUROSHELL access
 
 // Additional state
 static std::vector<VkImage> g_swapchainImages;
 static std::vector<VkImageView> g_swapchainImageViews;
-static VkSemaphore g_imageAvailableSemaphore = VK_NULL_HANDLE;
-static VkSemaphore g_renderFinishedSemaphore = VK_NULL_HANDLE;
-static VkFence g_inFlightFence = VK_NULL_HANDLE;
+VkSemaphore g_imageAvailableSemaphore = VK_NULL_HANDLE;  // Made non-static for NEUROSHELL access
+VkSemaphore g_renderFinishedSemaphore = VK_NULL_HANDLE;  // Made non-static for NEUROSHELL access
+VkFence g_inFlightFence = VK_NULL_HANDLE;  // Made non-static for NEUROSHELL access
 static uint32_t g_swapchainImageCount = 0;
 static VkFormat g_swapchainImageFormat = VK_FORMAT_UNDEFINED;
 
@@ -1029,6 +1029,15 @@ extern "C" void heidic_render_frame(GLFWwindow* window) {
         vkCmdDraw(g_commandBuffers[imageIndex], 3, 1, 0, 0);
     }
     
+    // Render NEUROSHELL UI (if enabled) - before ending render pass
+    #ifdef USE_NEUROSHELL
+    extern void neuroshell_render(VkCommandBuffer);
+    extern bool neuroshell_is_enabled();
+    if (neuroshell_is_enabled()) {
+        neuroshell_render(g_commandBuffers[imageIndex]);
+    }
+    #endif
+    
     vkCmdEndRenderPass(g_commandBuffers[imageIndex]);
     
     if (vkEndCommandBuffer(g_commandBuffers[imageIndex]) != VK_SUCCESS) {
@@ -1965,6 +1974,15 @@ extern "C" void heidic_render_frame_cube(GLFWwindow* window) {
     // Draw cube using indexed drawing
     vkCmdDrawIndexed(g_commandBuffers[imageIndex], g_cubeIndexCount, 1, 0, 0, 0);
     
+    // Render NEUROSHELL UI (if enabled) - before ending render pass
+    #ifdef USE_NEUROSHELL
+    extern void neuroshell_render(VkCommandBuffer);
+    extern bool neuroshell_is_enabled();
+    if (neuroshell_is_enabled()) {
+        neuroshell_render(g_commandBuffers[imageIndex]);
+    }
+    #endif
+    
     // Render ImGui overlay (if initialized)
     #ifdef USE_IMGUI
     if (g_imguiInitialized) {
@@ -2115,6 +2133,7 @@ extern "C" int heidic_init_imgui(GLFWwindow* window) {
     
     // Initialize ImGui Vulkan backend
     ImGui_ImplVulkan_InitInfo init_info = {};
+    init_info.ApiVersion = VK_API_VERSION_1_0; // Default to 1.0, can be overridden if needed
     init_info.Instance = g_instance;
     init_info.PhysicalDevice = g_physicalDevice;
     init_info.Device = g_device;
@@ -2122,11 +2141,12 @@ extern "C" int heidic_init_imgui(GLFWwindow* window) {
     init_info.Queue = g_graphicsQueue;
     init_info.PipelineCache = VK_NULL_HANDLE;
     init_info.DescriptorPool = g_imguiDescriptorPool;
-    init_info.RenderPass = g_renderPass;
-    init_info.Subpass = 0;
+    // In newer ImGui versions, RenderPass, Subpass, and MSAASamples are in PipelineInfoMain
+    init_info.PipelineInfoMain.RenderPass = g_renderPass;
+    init_info.PipelineInfoMain.Subpass = 0;
+    init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
     init_info.MinImageCount = g_swapchainImageCount;
     init_info.ImageCount = g_swapchainImageCount;
-    init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
     init_info.Allocator = nullptr;
     init_info.CheckVkResultFn = nullptr;
     
@@ -2558,6 +2578,15 @@ extern "C" void heidic_render_balls(GLFWwindow* window, int32_t ball_count, floa
         // Draw cube (ball)
         vkCmdDrawIndexed(g_commandBuffers[imageIndex], g_cubeIndexCount, 1, 0, 0, 0);
     }
+    
+    // Render NEUROSHELL UI (if enabled)
+    #ifdef USE_NEUROSHELL
+    extern void neuroshell_render(VkCommandBuffer);
+    extern bool neuroshell_is_enabled();
+    if (neuroshell_is_enabled()) {
+        neuroshell_render(g_commandBuffers[imageIndex]);
+    }
+    #endif
     
     vkCmdEndRenderPass(g_commandBuffers[imageIndex]);
     vkEndCommandBuffer(g_commandBuffers[imageIndex]);
@@ -3242,6 +3271,15 @@ extern "C" void heidic_render_dds_quad(GLFWwindow* window) {
 
     // Draw quad (2 triangles = 6 indices)
     vkCmdDrawIndexed(g_commandBuffers[imageIndex], 6, 1, 0, 0, 0);
+    
+    // Render NEUROSHELL UI (if enabled)
+    #ifdef USE_NEUROSHELL
+    extern void neuroshell_render(VkCommandBuffer);
+    extern bool neuroshell_is_enabled();
+    if (neuroshell_is_enabled()) {
+        neuroshell_render(g_commandBuffers[imageIndex]);
+    }
+    #endif
 
     vkCmdEndRenderPass(g_commandBuffers[imageIndex]);
     vkEndCommandBuffer(g_commandBuffers[imageIndex]);
@@ -5562,6 +5600,15 @@ extern "C" void heidic_render_obj_mesh(GLFWwindow* window) {
     
     // Draw mesh using indexed drawing
     vkCmdDrawIndexed(g_commandBuffers[imageIndex], indexCount, 1, 0, 0, 0);
+    
+    // Render NEUROSHELL UI (if enabled)
+    #ifdef USE_NEUROSHELL
+    extern void neuroshell_render(VkCommandBuffer);
+    extern bool neuroshell_is_enabled();
+    if (neuroshell_is_enabled()) {
+        neuroshell_render(g_commandBuffers[imageIndex]);
+    }
+    #endif
     
     vkCmdEndRenderPass(g_commandBuffers[imageIndex]);
     vkEndCommandBuffer(g_commandBuffers[imageIndex]);

@@ -1,5 +1,5 @@
 """
-SCRIBE - minimal pygame-based HEIDIC script editor scaffold.
+ELECTROSCRIBE - minimal pygame-based HEIDIC script editor scaffold.
 
 Features (current):
 - Open a target .hd file (default: examples/hot_reload_test/hot_reload_test.hd)
@@ -1526,16 +1526,143 @@ class Editor:
         
         return failed_count == 0, shader_compile_time
     
+    def _compile_neuroshell_shaders(self, project_root):
+        """Compile NEUROSHELL UI shaders if they exist.
+        Returns compilation time in seconds (0 if not compiled or failed)."""
+        neuroshell_shaders_dir = os.path.join(project_root, "neuroshell", "shaders")
+        if not os.path.exists(neuroshell_shaders_dir):
+            return 0.0
+        
+        shaders_to_compile = []
+        for shader_file in ["ui.vert", "ui.frag"]:
+            shader_path = os.path.join(neuroshell_shaders_dir, shader_file)
+            if os.path.exists(shader_path):
+                shaders_to_compile.append(shader_path)
+        
+        if not shaders_to_compile:
+            return 0.0  # No NEUROSHELL shaders found
+        
+        compile_start = time.time()
+        self.log_lines.append("Compiling NEUROSHELL shaders...")
+        
+        # Find glslc
+        glslc_found = False
+        glslc_path = None
+        
+        vulkan_sdk = os.environ.get("VULKAN_SDK")
+        if vulkan_sdk:
+            glslc_path = os.path.join(vulkan_sdk, "bin", "glslc.exe")
+            if os.path.exists(glslc_path):
+                glslc_found = True
+        
+        if not glslc_found:
+            import shutil
+            glslc_path = shutil.which("glslc")
+            if glslc_path:
+                glslc_found = True
+        
+        if not glslc_found:
+            self.log_lines.append("WARNING: glslc not found. NEUROSHELL shaders will not be compiled.")
+            return 0.0
+        
+        compiled_count = 0
+        failed_count = 0
+        
+        for shader_path in shaders_to_compile:
+            # Determine output path (.spv)
+            if shader_path.endswith('.vert'):
+                spv_path = shader_path + '.spv'
+            elif shader_path.endswith('.frag'):
+                spv_path = shader_path + '.spv'
+            else:
+                spv_path = shader_path + '.spv'
+            
+            # Determine shader stage
+            stage_flag = None
+            if shader_path.endswith('.vert'):
+                stage_flag = "-fshader-stage=vertex"
+            elif shader_path.endswith('.frag'):
+                stage_flag = "-fshader-stage=fragment"
+            
+            # Compile shader
+            compile_cmd = [glslc_path]
+            if stage_flag:
+                compile_cmd.append(stage_flag)
+            compile_cmd.extend([shader_path, "-o", spv_path])
+            
+            rel_path = os.path.relpath(shader_path, project_root)
+            result = self._run_step(f"NEUROSHELL-Shader({os.path.basename(shader_path)})", compile_cmd)
+            if result:
+                compiled_count += 1
+                self.log_lines.append(f"[OK] Compiled NEUROSHELL shader: {rel_path} -> {os.path.basename(spv_path)}")
+            else:
+                failed_count += 1
+                self.log_lines.append(f"[FAIL] Failed to compile NEUROSHELL shader: {rel_path}")
+        
+        compile_time = time.time() - compile_start
+        
+        if compiled_count > 0:
+            self.log_lines.append(f"NEUROSHELL shader compilation: {compiled_count} succeeded, {failed_count} failed")
+        elif failed_count > 0:
+            self.log_lines.append(f"NEUROSHELL shader compilation failed: {failed_count} shader(s) failed")
+        
+        return compile_time if compiled_count > 0 else 0.0
+    
+    def _copy_neuroshell_shaders(self, project_dir, project_root):
+        """Copy compiled NEUROSHELL shader .spv files to project directory."""
+        neuroshell_shaders_dir = os.path.join(project_root, "neuroshell", "shaders")
+        if not os.path.exists(neuroshell_shaders_dir):
+            return
+        
+        shaders_to_copy = ["ui.vert.spv", "ui.frag.spv"]
+        for shader_file in shaders_to_copy:
+            source_shader = os.path.join(neuroshell_shaders_dir, shader_file)
+            if os.path.exists(source_shader):
+                dest_shader = os.path.join(project_dir, shader_file)
+                try:
+                    import shutil
+                    shutil.copy2(source_shader, dest_shader)
+                    self.log_lines.append(f"Copied NEUROSHELL shader: {shader_file}")
+                except Exception as e:
+                    self.log_lines.append(f"WARNING: Failed to copy NEUROSHELL shader {shader_file}: {e}")
+    
     def _do_build(self, hd_path, cpp_path):
         """Build the C++ code with all necessary libraries and includes."""
-        # Get project root (two levels up from SCRIBE)
+        # Get project root (two levels up from ELECTROSCRIBE)
         script_dir = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.abspath(os.path.join(script_dir, ".."))
         project_dir = os.path.dirname(cpp_path)  # Project directory (where .hd file is)
         vulkan_helpers_path = os.path.join(project_root, "vulkan", "eden_vulkan_helpers.cpp")
+        ui_window_manager_path = os.path.join(project_root, "vulkan", "ui_window_manager.cpp")
+        
+        # Check if UI windows are enabled in project config
+        ui_windows_enabled = False
+        config_path = os.path.join(project_dir, ".project_config")
+        neuroshell_enabled = False
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("enable_ui_windows="):
+                            value = line.split("=", 1)[1].strip().lower()
+                            ui_windows_enabled = value in ("true", "1", "yes")
+                        elif line.startswith("enable_neuroshell="):
+                            value = line.split("=", 1)[1].strip().lower()
+                            neuroshell_enabled = value in ("true", "1", "yes")
+            except Exception as e:
+                self.log_lines.append(f"WARNING: Could not read project config: {e}")
         
         # Compile shaders first (if we have hot shaders)
         shader_compile_success, shader_compile_time = self._compile_shaders_for_build(project_dir)
+        
+        # Compile NEUROSHELL shaders if enabled
+        if neuroshell_enabled:
+            neuroshell_shader_time = self._compile_neuroshell_shaders(project_root)
+            if neuroshell_shader_time > 0:
+                shader_compile_time += neuroshell_shader_time
+            # Copy compiled NEUROSHELL shaders to project directory
+            self._copy_neuroshell_shaders(project_dir, project_root)
         
         # Ensure shader files exist in project directory
         shader_source_dir = os.path.join(project_root, "examples", "spinning_triangle")
@@ -1584,12 +1711,132 @@ class Editor:
             else:
                 build_cmd.extend(["-I", glfw_path])
         
+        # Add SDL3/SDL2 include path if UI windows are enabled (prefer SDL3)
+        sdl3_path = None
+        sdl2_path = None
+        use_sdl3 = False
+        if ui_windows_enabled:
+            # Try SDL3 first
+            sdl3_path = os.environ.get("SDL3_PATH")
+            if not sdl3_path:
+                # Try common SDL3 locations
+                for path in ["C:\\SDL3", "C:\\SDL3-3.0.0", "C:\\Program Files\\SDL3"]:
+                    if os.path.exists(path):
+                        sdl3_path = path
+                        break
+            
+            if sdl3_path and os.path.exists(os.path.join(sdl3_path, "include", "SDL3", "SDL.h")):
+                use_sdl3 = True
+                sdl3_include = os.path.join(sdl3_path, "include")
+                build_cmd.extend(["-I", sdl3_include])
+                self.log_lines.append(f"Using SDL3 include: {sdl3_include}")
+            else:
+                # Fallback to SDL2
+                sdl2_path = os.environ.get("SDL2_PATH")
+                if not sdl2_path:
+                    # Try common SDL2 locations
+                    for path in ["C:\\SDL2", "C:\\SDL2-2.30.0", "C:\\Program Files\\SDL2"]:
+                        if os.path.exists(path):
+                            sdl2_path = path
+                            break
+                
+                if sdl2_path:
+                    sdl2_include = os.path.join(sdl2_path, "include")
+                    if os.path.exists(sdl2_include):
+                        build_cmd.extend(["-I", sdl2_include])
+                        self.log_lines.append(f"Using SDL2 include: {sdl2_include}")
+                    else:
+                        build_cmd.extend(["-I", sdl2_path])
+                        self.log_lines.append(f"Using SDL2 include: {sdl2_path}")
+                else:
+                    self.log_lines.append("WARNING: SDL3/SDL2 not found - UI windows may not work. Set SDL3_PATH or SDL2_PATH environment variable.")
+        
+        # Add ImGui include path if UI windows are enabled
+        imgui_path = None
+        if ui_windows_enabled:
+            # Try to find ImGui (check common locations)
+            imgui_path = os.environ.get("IMGUI_PATH")
+            if not imgui_path:
+                # Try common locations
+                for path in [
+                    os.path.join(project_root, "vulkan_reference", "official_samples", "third_party", "imgui"),
+                    os.path.join(project_root, "third_party", "imgui"),
+                    "C:\\imgui",
+                ]:
+                    if os.path.exists(path) and os.path.exists(os.path.join(path, "imgui.h")):
+                        imgui_path = path
+                        break
+            
+            if imgui_path:
+                build_cmd.extend(["-I", imgui_path])
+                # Add backends directory for ImGui SDL3/SDL2 backend
+                imgui_backends = os.path.join(imgui_path, "backends")
+                if os.path.exists(imgui_backends):
+                    build_cmd.extend(["-I", imgui_backends])
+                self.log_lines.append(f"Using ImGui include: {imgui_path}")
+            else:
+                self.log_lines.append("WARNING: ImGui not found - UI windows may not work. Set IMGUI_PATH environment variable.")
+        
         # Add source files
         build_cmd.append(cpp_path)
         if os.path.exists(vulkan_helpers_path):
             build_cmd.append(vulkan_helpers_path)
         else:
             self.log_lines.append(f"WARNING: Vulkan helpers not found at {vulkan_helpers_path}")
+        
+        # Add UI window manager if enabled
+        if ui_windows_enabled:
+            if os.path.exists(ui_window_manager_path):
+                build_cmd.append(ui_window_manager_path)
+                self.log_lines.append("UI windows enabled - including ui_window_manager.cpp")
+            else:
+                self.log_lines.append(f"WARNING: UI window manager not found at {ui_window_manager_path}")
+        
+        # Add ImGui source files if UI windows are enabled (must be before output flag)
+        if ui_windows_enabled and imgui_path:
+            imgui_sources = [
+                "imgui.cpp",
+                "imgui_draw.cpp",
+                "imgui_tables.cpp",
+                "imgui_widgets.cpp",
+            ]
+            # Add SDL3 or SDL2 backend for ImGui (prefer SDL3)
+            imgui_backends = os.path.join(imgui_path, "backends")
+            if os.path.exists(imgui_backends):
+                if use_sdl3:
+                    imgui_sources.extend([
+                        "backends/imgui_impl_sdl3.cpp",
+                        "backends/imgui_impl_sdlrenderer3.cpp",
+                    ])
+                else:
+                    imgui_sources.extend([
+                        "backends/imgui_impl_sdl2.cpp",
+                        "backends/imgui_impl_sdlrenderer2.cpp",
+                    ])
+                # Always include Vulkan/GLFW backends (needed for eden_vulkan_helpers.cpp)
+                imgui_sources.extend([
+                    "backends/imgui_impl_vulkan.cpp",
+                    "backends/imgui_impl_glfw.cpp",
+                ])
+            
+            for src_file in imgui_sources:
+                src_path = os.path.join(imgui_path, src_file)
+                if os.path.exists(src_path):
+                    build_cmd.append(src_path)
+                else:
+                    self.log_lines.append(f"WARNING: ImGui source not found: {src_path}")
+        
+        # Copy SDL3.dll to project directory if UI windows are enabled and using SDL3
+        if ui_windows_enabled and use_sdl3 and sdl3_path:
+            sdl3_dll_path = os.path.join(sdl3_path, "bin", "x64", "SDL3.dll")
+            if os.path.exists(sdl3_dll_path):
+                project_dll_path = os.path.join(project_dir, "SDL3.dll")
+                try:
+                    import shutil
+                    shutil.copy2(sdl3_dll_path, project_dll_path)
+                    self.log_lines.append(f"Copied SDL3.dll to project directory")
+                except Exception as e:
+                    self.log_lines.append(f"WARNING: Could not copy SDL3.dll: {e}")
         
         # Add output - build to project directory
         exe_name = os.path.splitext(os.path.basename(hd_path))[0] + ".exe"
@@ -1620,6 +1867,68 @@ class Editor:
         
         # Add libraries to link
         build_cmd.extend(["-lvulkan-1", "-lglfw3", "-lgdi32"])
+        
+        # Add SDL3/SDL2 library path and linking if UI windows are enabled
+        if ui_windows_enabled:
+            if use_sdl3 and sdl3_path:
+                # Try common SDL3 library locations
+                for lib_path in [
+                    os.path.join(sdl3_path, "lib", "x64"),
+                    os.path.join(sdl3_path, "lib"),
+                    os.path.join(sdl3_path, "lib-mingw-w64"),
+                ]:
+                    if os.path.exists(lib_path):
+                        build_cmd.extend(["-L", lib_path])
+                        self.log_lines.append(f"Using SDL3 library path: {lib_path}")
+                        break
+                
+                # Link SDL3 (SDL3 doesn't have a separate main library like SDL2)
+                build_cmd.append("-lSDL3")
+                # SDL3 requires SDL_main to be defined - we'll define it as a stub in ui_window_manager.cpp
+            elif sdl2_path:
+                # Try common SDL2 library locations
+                for lib_path in [
+                    os.path.join(sdl2_path, "lib", "x64"),
+                    os.path.join(sdl2_path, "lib"),
+                    os.path.join(sdl2_path, "lib-mingw-w64"),
+                ]:
+                    if os.path.exists(lib_path):
+                        build_cmd.extend(["-L", lib_path])
+                        self.log_lines.append(f"Using SDL2 library path: {lib_path}")
+                        break
+                
+                # Link SDL2
+                build_cmd.append("-lSDL2")
+                build_cmd.append("-lSDL2main")
+        
+        # Add compile flags for UI windows
+        if ui_windows_enabled:
+            if use_sdl3:
+                build_cmd.append("-DUSE_SDL3_UI")
+                self.log_lines.append("UI windows enabled - added USE_SDL3_UI and USE_IMGUI flags")
+            else:
+                build_cmd.append("-DUSE_SDL2_UI")
+                self.log_lines.append("UI windows enabled - added USE_SDL2_UI and USE_IMGUI flags")
+            build_cmd.append("-DUSE_IMGUI")
+        
+        # Add NEUROSHELL (lightweight in-game UI system) if enabled
+        if neuroshell_enabled:
+            neuroshell_path = os.path.join(project_root, "neuroshell")
+            neuroshell_include = os.path.join(neuroshell_path, "include")
+            neuroshell_src = os.path.join(neuroshell_path, "src", "neuroshell.cpp")
+            
+            if os.path.exists(neuroshell_include):
+                build_cmd.extend(["-I", neuroshell_include])
+                self.log_lines.append(f"Using NEUROSHELL include: {neuroshell_include}")
+            
+            if os.path.exists(neuroshell_src):
+                build_cmd.append(neuroshell_src)
+                self.log_lines.append("NEUROSHELL enabled - including neuroshell.cpp")
+            else:
+                self.log_lines.append(f"WARNING: NEUROSHELL source not found at {neuroshell_src}")
+            
+            build_cmd.append("-DUSE_NEUROSHELL")
+            self.log_lines.append("NEUROSHELL enabled - added USE_NEUROSHELL flag")
         
         self._run_step("Build", build_cmd)
         
@@ -2014,8 +2323,166 @@ def text_input_dialog(screen, editor, prompt, initial_text=""):
     return None
 
 
+def load_project_config(project_dir):
+    """Load project configuration from .project_config file.
+    Returns a dict with settings, or default values if file doesn't exist."""
+    config_path = os.path.join(project_dir, ".project_config")
+    config = {
+        "enable_ui_windows": False,
+        "enable_neuroshell": False
+    }
+    
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line:
+                        key, value = line.split("=", 1)
+                        key = key.strip()
+                        value = value.strip()
+                        if key == "enable_ui_windows":
+                            config["enable_ui_windows"] = value.lower() in ("true", "1", "yes")
+                        elif key == "enable_neuroshell":
+                            config["enable_neuroshell"] = value.lower() in ("true", "1", "yes")
+        except Exception as e:
+            print(f"Warning: Could not read project config: {e}")
+    
+    return config
+
+
+def project_settings_dialog(screen, editor):
+    """Project settings dialog with checkboxes for optional features.
+    Returns a dict with settings or None if cancelled."""
+    font = pygame.font.SysFont("Consolas", 16)
+    dialog_width = 600
+    dialog_height = 280
+    dialog_x = (SCREEN_WIDTH - dialog_width) // 2
+    dialog_y = (SCREEN_HEIGHT - dialog_height) // 2
+    
+    # Settings
+    enable_ui_windows = False
+    enable_neuroshell = False
+    
+    clock = pygame.time.Clock()
+    running = True
+    confirmed = False
+    
+    while running:
+        clock.tick(60)
+        
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return None
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_RETURN:
+                    confirmed = True
+                    running = False
+                    break
+                elif event.key == pygame.K_ESCAPE:
+                    return None
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:  # Left click
+                    mx, my = event.pos
+                    # Check if click is in checkbox areas
+                    checkbox_x = dialog_x + 30
+                    checkbox_size = 20
+                    
+                    # UI Windows checkbox
+                    ui_checkbox_y = dialog_y + 60
+                    if (checkbox_x <= mx <= checkbox_x + checkbox_size and
+                        ui_checkbox_y <= my <= ui_checkbox_y + checkbox_size):
+                        enable_ui_windows = not enable_ui_windows
+                    
+                    # NEUROSHELL checkbox
+                    neuroshell_checkbox_y = dialog_y + 140
+                    if (checkbox_x <= mx <= checkbox_x + checkbox_size and
+                        neuroshell_checkbox_y <= my <= neuroshell_checkbox_y + checkbox_size):
+                        enable_neuroshell = not enable_neuroshell
+        
+        # Redraw editor background
+        editor.draw(screen)
+        
+        # Draw semi-transparent overlay
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+        overlay.set_alpha(180)
+        overlay.fill((0, 0, 0))
+        screen.blit(overlay, (0, 0))
+        
+        # Draw dialog
+        dialog_surface = pygame.Surface((dialog_width, dialog_height))
+        dialog_surface.fill((50, 50, 50))
+        pygame.draw.rect(dialog_surface, (70, 70, 70), pygame.Rect(0, 0, dialog_width, dialog_height), 2)
+        
+        # Title
+        title_surf = font.render("Project Settings", True, (240, 240, 240))
+        dialog_surface.blit(title_surf, (10, 10))
+        
+        checkbox_x = 30
+        checkbox_size = 20
+        
+        # UI Windows checkbox
+        ui_checkbox_y = 60
+        checkbox_rect = pygame.Rect(checkbox_x, ui_checkbox_y, checkbox_size, checkbox_size)
+        pygame.draw.rect(dialog_surface, (30, 30, 30), checkbox_rect)
+        pygame.draw.rect(dialog_surface, (100, 150, 255), checkbox_rect, 2)
+        
+        if enable_ui_windows:
+            pygame.draw.line(dialog_surface, (100, 255, 100), 
+                           (checkbox_x + 4, ui_checkbox_y + 10),
+                           (checkbox_x + 8, ui_checkbox_y + 14), 3)
+            pygame.draw.line(dialog_surface, (100, 255, 100),
+                           (checkbox_x + 8, ui_checkbox_y + 14),
+                           (checkbox_x + 16, ui_checkbox_y + 4), 3)
+        
+        label_text = "Enable UI Windows (SDL2 + ImGui for development tools)"
+        label_surf = font.render(label_text, True, (240, 240, 240))
+        dialog_surface.blit(label_surf, (checkbox_x + checkbox_size + 10, ui_checkbox_y + 2))
+        
+        desc_text = "Adds separate windows for level editor, debug tools, etc."
+        desc_surf = font.render(desc_text, True, (150, 150, 150))
+        dialog_surface.blit(desc_surf, (checkbox_x + checkbox_size + 10, ui_checkbox_y + 22))
+        
+        # NEUROSHELL checkbox
+        neuroshell_checkbox_y = 140
+        checkbox_rect = pygame.Rect(checkbox_x, neuroshell_checkbox_y, checkbox_size, checkbox_size)
+        pygame.draw.rect(dialog_surface, (30, 30, 30), checkbox_rect)
+        pygame.draw.rect(dialog_surface, (255, 150, 100), checkbox_rect, 2)
+        
+        if enable_neuroshell:
+            pygame.draw.line(dialog_surface, (100, 255, 100), 
+                           (checkbox_x + 4, neuroshell_checkbox_y + 10),
+                           (checkbox_x + 8, neuroshell_checkbox_y + 14), 3)
+            pygame.draw.line(dialog_surface, (100, 255, 100),
+                           (checkbox_x + 8, neuroshell_checkbox_y + 14),
+                           (checkbox_x + 16, neuroshell_checkbox_y + 4), 3)
+        
+        label_text = "Enable NEUROSHELL (Lightweight in-game UI system)"
+        label_surf = font.render(label_text, True, (240, 240, 240))
+        dialog_surface.blit(label_surf, (checkbox_x + checkbox_size + 10, neuroshell_checkbox_y + 2))
+        
+        desc_text = "Fast compile, fast runtime UI with animated textures and effects"
+        desc_surf = font.render(desc_text, True, (150, 150, 150))
+        dialog_surface.blit(desc_surf, (checkbox_x + checkbox_size + 10, neuroshell_checkbox_y + 22))
+        
+        # Instructions
+        hint_surf = font.render("Enter: Confirm | Esc: Cancel", True, (150, 150, 150))
+        dialog_surface.blit(hint_surf, (10, dialog_height - 25))
+        
+        screen.blit(dialog_surface, (dialog_x, dialog_y))
+        pygame.display.flip()
+    
+    # Return settings if confirmed, None if cancelled
+    if confirmed:
+        return {
+            "enable_ui_windows": enable_ui_windows,
+            "enable_neuroshell": enable_neuroshell
+        }
+    return None
+
+
 def project_picker_dialog(screen, editor):
-    """Simple project picker that lists all .hd files in SCRIBE/PROJECTS/"""
+    """Simple project picker that lists all .hd files in ELECTROSCRIBE/PROJECTS/"""
     font = pygame.font.SysFont("Consolas", 16)
     dialog_width = 600
     dialog_height = 500
@@ -2236,7 +2703,7 @@ def main():
     
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-    pygame.display.set_caption("SCRIBE - HEIDIC Script Editor")
+    pygame.display.set_caption("ELECTROSCRIBE - HEIDIC Script Editor")
     clock = pygame.time.Clock()
     editor = Editor(path)
 
@@ -2461,7 +2928,12 @@ def main():
                             if action == "new":
                                 project_name = text_input_dialog(screen, editor, "New HEIDIC Project (name):")
                                 if project_name:
-                                    # Create project folder in SCRIBE/PROJECTS/
+                                    # Show project settings dialog
+                                    settings = project_settings_dialog(screen, editor)
+                                    if settings is None:
+                                        continue  # User cancelled settings
+                                    
+                                    # Create project folder in ELECTROSCRIBE/PROJECTS/
                                     project_dir = os.path.join(os.path.dirname(__file__), "PROJECTS", project_name)
                                     os.makedirs(project_dir, exist_ok=True)
                                     # Create shaders and textures folders
@@ -2469,6 +2941,17 @@ def main():
                                     textures_dir = os.path.join(project_dir, "textures")
                                     os.makedirs(shaders_dir, exist_ok=True)
                                     os.makedirs(textures_dir, exist_ok=True)
+                                    # Create fonts folder if NEUROSHELL is enabled
+                                    if settings.get('enable_neuroshell', False):
+                                        fonts_dir = os.path.join(project_dir, "fonts")
+                                        os.makedirs(fonts_dir, exist_ok=True)
+                                    
+                                    # Save project settings to .project_config file
+                                    config_path = os.path.join(project_dir, ".project_config")
+                                    with open(config_path, "w") as f:
+                                        f.write(f"enable_ui_windows={settings['enable_ui_windows']}\n")
+                                        f.write(f"enable_neuroshell={settings.get('enable_neuroshell', False)}\n")
+                                    
                                     # Create .hd file with same name as project
                                     hd_filename = project_name + ".hd"
                                     new_path = os.path.join(project_dir, hd_filename)
@@ -2476,10 +2959,49 @@ def main():
                                     # All projects now support shader hotloading
                                     if project_name.lower() == "hotload_test":
                                         # Create hot-reload template
+                                        # Generate NEUROSHELL code if enabled
+                                        hotload_neuroshell_externs = ""
+                                        hotload_neuroshell_init = ""
+                                        hotload_neuroshell_update = ""
+                                        hotload_neuroshell_cleanup = ""
+                                        
+                                        if settings.get('enable_neuroshell', False):
+                                            hotload_neuroshell_externs = """// NEUROSHELL - Lightweight in-game UI system
+extern fn neuroshell_init(window: GLFWwindow): i32;
+extern fn neuroshell_update(delta_time: f32): void;
+extern fn neuroshell_shutdown(): void;
+extern fn neuroshell_is_enabled(): bool;
+
+"""
+                                            hotload_neuroshell_init = """    // Initialize NEUROSHELL (if enabled)
+    if (neuroshell_is_enabled()) {
+        print("Initializing NEUROSHELL...\\n");
+        let neuroshell_init_result: i32 = neuroshell_init(window);
+        if (neuroshell_init_result == 0) {
+            print("WARNING: NEUROSHELL initialization failed!\\n");
+        } else {
+            print("NEUROSHELL initialized!\\n");
+        }
+    }
+
+"""
+                                            hotload_neuroshell_update = """        // Update NEUROSHELL (if enabled)
+        if (neuroshell_is_enabled()) {
+            let delta_time: f32 = 0.016;  // ~60 FPS
+            neuroshell_update(delta_time);
+        }
+
+"""
+                                            hotload_neuroshell_cleanup = """    // Cleanup NEUROSHELL (if enabled)
+    if (neuroshell_is_enabled()) {
+        neuroshell_shutdown();
+    }
+
+"""
+                                        
                                         template = f"""// HEIDIC Project: {project_name}
 // Hot-reloadable project with Vulkan rendering
-
-extern fn heidic_glfw_vulkan_hints(): void;
+{hotload_neuroshell_externs}extern fn heidic_glfw_vulkan_hints(): void;
 extern fn heidic_init_renderer(window: GLFWwindow): i32;
 extern fn heidic_render_frame(window: GLFWwindow): void;
 extern fn heidic_set_rotation_speed(speed: f32): void;
@@ -2530,7 +3052,7 @@ fn main(): void {{
     }}
 
     print("Renderer initialized!\\n");
-    print("Starting render loop...\\n");
+{hotload_neuroshell_init}    print("Starting render loop...\\n");
     print("\\n");
     print("=== HOT-RELOAD INSTRUCTIONS ===\\n");
     print("1. Edit rotation_speed in the @hot system\\n");
@@ -2550,13 +3072,12 @@ fn main(): void {{
         // Get rotation speed from hot-reloadable system
         let rotation_speed: f32 = get_rotation_speed();
         heidic_set_rotation_speed(rotation_speed); // pass speed to renderer for live updates
-        
-        heidic_render_frame(window);
+{hotload_neuroshell_update}        heidic_render_frame(window);
         heidic_sleep_ms(16); // ~60 FPS cap
     }}
 
     print("Cleaning up...\\n");
-    heidic_cleanup_renderer();
+{hotload_neuroshell_cleanup}    heidic_cleanup_renderer();
     glfwDestroyWindow(window);
     glfwTerminate();
     print("Program exited successfully.\\n");
@@ -2630,17 +3151,111 @@ fn main(): void {{
 """
                                     else:
                                         # All projects support shader hotloading - use default template
+                                        # Generate UI windows code if enabled
+                                        ui_externs = ""
+                                        ui_init = ""
+                                        ui_update = ""
+                                        ui_render = ""
+                                        ui_cleanup = ""
+                                        
+                                        # Generate NEUROSHELL code if enabled
+                                        neuroshell_externs = ""
+                                        neuroshell_init = ""
+                                        neuroshell_update = ""
+                                        neuroshell_cleanup = ""
+                                        
+                                        if settings.get('enable_neuroshell', False):
+                                            neuroshell_externs = """// NEUROSHELL - Lightweight in-game UI system
+extern fn neuroshell_init(window: GLFWwindow): i32;
+extern fn neuroshell_update(delta_time: f32): void;
+extern fn neuroshell_shutdown(): void;
+extern fn neuroshell_is_enabled(): bool;
+
+// NEUROSHELL UI Element Creation
+extern fn neuroshell_create_panel(x: f32, y: f32, width: f32, height: f32): u32;
+extern fn neuroshell_create_button(x: f32, y: f32, width: f32, height: f32, texture_path: string): u32;
+extern fn neuroshell_create_image(x: f32, y: f32, width: f32, height: f32, texture_path: string): u32;
+extern fn neuroshell_create_animated_texture(x: f32, y: f32, width: f32, height: f32, texture_path: string, frame_width: i32, frame_height: i32, frame_count: i32, fps: f32): u32;
+
+// NEUROSHELL Element Properties
+extern fn neuroshell_set_visible(element_id: u32, visible: bool): void;
+extern fn neuroshell_set_position(element_id: u32, x: f32, y: f32): void;
+extern fn neuroshell_set_size(element_id: u32, width: f32, height: f32): void;
+extern fn neuroshell_set_color(element_id: u32, r: f32, g: f32, b: f32, a: f32): void;
+extern fn neuroshell_set_depth(element_id: u32, depth: f32): void;
+extern fn neuroshell_set_animation_state(element_id: u32, playing: bool, loop: bool): void;
+
+// NEUROSHELL Input
+extern fn neuroshell_is_button_clicked(button_id: u32): bool;
+extern fn neuroshell_get_mouse_position(x: *f32, y: *f32): void;
+
+"""
+                                            neuroshell_init = """    // Initialize NEUROSHELL (if enabled)
+    if (neuroshell_is_enabled()) {
+        print("Initializing NEUROSHELL...\\n");
+        let neuroshell_init_result: i32 = neuroshell_init(window);
+        if (neuroshell_init_result == 0) {
+            print("WARNING: NEUROSHELL initialization failed!\\n");
+        } else {
+            print("NEUROSHELL initialized!\\n");
+        }
+    }
+
+"""
+                                            neuroshell_update = """        // Update NEUROSHELL (if enabled)
+        if (neuroshell_is_enabled()) {
+            let delta_time: f32 = 0.016;  // ~60 FPS
+            neuroshell_update(delta_time);
+        }
+
+"""
+                                            neuroshell_cleanup = """    // Cleanup NEUROSHELL (if enabled)
+    if (neuroshell_is_enabled()) {
+        neuroshell_shutdown();
+    }
+
+"""
+                                        
+                                        if settings['enable_ui_windows']:
+                                            ui_externs = """// UI Windows (SDL2 + ImGui) - Optional game interface windows
+extern fn ui_manager_init(): bool;
+extern fn ui_manager_update(): void;
+extern fn ui_manager_render(): void;
+extern fn ui_manager_shutdown(): void;
+extern fn ui_manager_is_enabled(): bool;
+
+"""
+                                            # Single braces - Python will insert these literally into the f-string
+                                            ui_init = """    // Initialize UI windows (if enabled)
+    if (ui_manager_is_enabled()) {
+        print("Initializing UI windows...\\n");
+        ui_manager_init();
+        print("UI windows initialized!\\n");
+    }
+
+"""
+                                            ui_update = """        // Update UI windows (if enabled)
+        if (ui_manager_is_enabled()) {
+            ui_manager_update();
+        }
+
+"""
+                                            ui_render = """        // Render UI windows (if enabled)
+        if (ui_manager_is_enabled()) {
+            ui_manager_render();
+        }
+
+"""
+                                            ui_cleanup = """    // Cleanup UI windows (if enabled)
+    if (ui_manager_is_enabled()) {
+        ui_manager_shutdown();
+    }
+
+"""
+                                        
                                         template = f"""// HEIDIC Project: {project_name}
 // This project supports shader hotloading - add @hot shader declarations to use it!
-
-extern fn heidic_glfw_vulkan_hints(): void;
-extern fn heidic_init_renderer(window: GLFWwindow): i32;
-extern fn heidic_render_frame(window: GLFWwindow): void;
-extern fn heidic_set_rotation_speed(speed: f32): void;
-extern fn heidic_cleanup_renderer(): void;
-extern fn heidic_sleep_ms(milliseconds: i32): void;
-
-extern fn heidic_glfw_vulkan_hints(): void;
+{ui_externs}{neuroshell_externs}extern fn heidic_glfw_vulkan_hints(): void;
 extern fn heidic_init_renderer(window: GLFWwindow): i32;
 extern fn heidic_render_frame(window: GLFWwindow): void;
 extern fn heidic_set_rotation_speed(speed: f32): void;
@@ -2695,7 +3310,7 @@ fn main(): void {{
     }}
 
     print("Renderer initialized!\\n");
-    print("Starting render loop...\\n");
+{ui_init}{neuroshell_init}    print("Starting render loop...\\n");
     print("Press ESC or close the window to exit.\\n");
     print("\\n");
     print("=== HOT-RELOAD AVAILABLE ===\\n");
@@ -2712,13 +3327,12 @@ fn main(): void {{
         // Get rotation speed from hot-reloadable system
         let rotation_speed: f32 = get_rotation_speed();
         heidic_set_rotation_speed(rotation_speed); // pass speed to renderer for live updates
-        
-        heidic_render_frame(window);
-        heidic_sleep_ms(16); // ~60 FPS cap
+{ui_update}{neuroshell_update}        heidic_render_frame(window);
+{ui_render}        heidic_sleep_ms(16); // ~60 FPS cap
     }}
 
     print("Cleaning up...\\n");
-    heidic_cleanup_renderer();
+{ui_cleanup}{neuroshell_cleanup}    heidic_cleanup_renderer();
     glfwDestroyWindow(window);
     glfwTerminate();
     print("Program exited successfully.\\n");

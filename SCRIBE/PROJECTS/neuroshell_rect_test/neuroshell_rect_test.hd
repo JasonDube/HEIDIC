@@ -1,0 +1,146 @@
+// HEIDIC Project: neuroshell_rect_test
+// Test project: Draw a solid color rectangle using NEUROSHELL
+
+// NEUROSHELL - Lightweight in-game UI system
+extern fn neuroshell_init(window: GLFWwindow): i32;
+extern fn neuroshell_update(delta_time: f32): void;
+extern fn neuroshell_shutdown(): void;
+extern fn neuroshell_is_enabled(): bool;
+
+// NEUROSHELL UI Element Creation
+extern fn neuroshell_create_panel(x: f32, y: f32, width: f32, height: f32): i32;
+extern fn neuroshell_set_color(element_id: i32, r: f32, g: f32, b: f32, a: f32): void;
+extern fn neuroshell_set_visible(element_id: i32, visible: bool): void;
+extern fn neuroshell_set_depth(element_id: i32, depth: f32): void;
+
+// NEUROSHELL Font System
+extern fn neuroshell_load_font(font_path: string): i32;
+extern fn neuroshell_create_text(x: f32, y: f32, text: string, font_id: i32, char_width: f32, char_height: f32): i32;
+
+extern fn heidic_glfw_vulkan_hints(): void;
+extern fn heidic_init_renderer(window: GLFWwindow): i32;
+extern fn heidic_render_frame(window: GLFWwindow): void;
+extern fn heidic_cleanup_renderer(): void;
+extern fn heidic_sleep_ms(milliseconds: i32): void;
+
+fn main(): void {
+    print("=== neuroshell_rect_test ===\n");
+    print("Testing NEUROSHELL: Displaying text with sprite sheet font\n");
+    print("Initializing GLFW...\n");
+
+    let init_result: i32 = glfwInit();
+    if init_result == 0 {
+        print("Failed to initialize GLFW!\n");
+        return;
+    }
+
+    print("GLFW initialized.\n");
+    heidic_glfw_vulkan_hints();
+    
+    print("Creating window (800x600)...\n");
+    let window: GLFWwindow = glfwCreateWindow(800, 600, "NEUROSHELL Rectangle Test", 0, 0);
+    if window == 0 {
+        print("Failed to create window!\n");
+        glfwTerminate();
+        return;
+    }
+
+    print("Window created.\n");
+    print("Initializing Vulkan renderer...\n");
+
+    let renderer_init: i32 = heidic_init_renderer(window);
+    if renderer_init == 0 {
+        print("Failed to initialize renderer!\n");
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return;
+    }
+
+    print("Renderer initialized!\n");
+    
+    // Initialize NEUROSHELL
+    print("Initializing NEUROSHELL...\n");
+    let neuroshell_init_result: i32 = neuroshell_init(window);
+    if (neuroshell_init_result == 0) {
+        print("WARNING: NEUROSHELL initialization failed!\n");
+    } else {
+        print("NEUROSHELL initialized!\n");
+        
+        // Load font
+        print("Loading font...\n");
+        let font_id: i32 = neuroshell_load_font("fonts/dbyte_2x.png");
+        if (font_id == 0) {
+            print("WARNING: Failed to load font!\n");
+        } else {
+            print("Font loaded successfully!\n");
+            
+            // Create text element: "Welcome to NEUROSHELL human"
+            // Position at (310, 290) - inside the red rectangle (which is at 300, 250, size 200x100)
+            // Use 8x8 pixel characters for smaller text
+            let welcome_text: string = "Welcome to NEUROSHELL human";
+            let text_id: i32 = neuroshell_create_text(310.0, 290.0, welcome_text, font_id, 8.0, 8.0);
+            
+            if (text_id != 0) {
+                // Set text color to white
+                neuroshell_set_color(text_id, 1.0, 1.0, 1.0, 1.0);
+                
+                // Set depth to be on top (higher depth = renders on top)
+                neuroshell_set_depth(text_id, 10.0);
+                
+                // Make sure it's visible
+                neuroshell_set_visible(text_id, true);
+                
+                print("Created text: Welcome to NEUROSHELL human\n");
+            } else {
+                print("ERROR: Failed to create text!\n");
+            }
+        }
+        
+        // Create a solid color rectangle (panel) in the center of the screen
+        // Screen is 800x600, so center would be around (300, 250) with size 300x100 (longer)
+        let rect_id: i32 = neuroshell_create_panel(300.0, 250.0, 300.0, 100.0);
+        
+        if (rect_id != 0) {
+            // Set color to very dark grey, almost black (R=0.05, G=0.05, B=0.05, A=1.0)
+            neuroshell_set_color(rect_id, 0.05, 0.05, 0.05, 1.0);
+            
+            // Set depth lower than text (lower depth = renders behind)
+            neuroshell_set_depth(rect_id, 5.0);
+            
+            // Make sure it's visible
+            neuroshell_set_visible(rect_id, true);
+            
+            print("Created dark grey rectangle at (300, 250) with size 300x100\n");
+        } else {
+            print("ERROR: Failed to create rectangle!\n");
+        }
+    }
+
+    print("Starting render loop...\n");
+    print("Press ESC or close the window to exit.\n");
+    print("\n");
+
+    while glfwWindowShouldClose(window) == 0 {
+        glfwPollEvents();
+
+        if glfwGetKey(window, 256) == 1 { // ESC key
+            glfwSetWindowShouldClose(window, 1);
+        }
+
+        // Update NEUROSHELL
+        let delta_time: f32 = 0.016;  // ~60 FPS
+        neuroshell_update(delta_time);
+
+        heidic_render_frame(window);
+        heidic_sleep_ms(16); // ~60 FPS cap
+    }
+
+    print("Cleaning up...\n");
+    // Cleanup NEUROSHELL
+    neuroshell_shutdown();
+    heidic_cleanup_renderer();
+    glfwDestroyWindow(window);
+    glfwTerminate();
+    print("Program exited successfully.\n");
+    print("Done!\n");
+}

@@ -1,4 +1,4 @@
-# H_SCRIBE - HEIDIC Script Editor
+# ELECTROSCRIBE - HEIDIC Script Editor
 
 A lightweight Pygame-based script editor for the HEIDIC language with integrated compilation, building, and hot-reload support.
 
@@ -27,13 +27,13 @@ This will install:
 ### Running the Editor
 
 ```bash
-cd H_SCRIBE
+cd ELECTROSCRIBE
 python main.py
 ```
 
 Or from the project root:
 ```bash
-python H_SCRIBE/main.py
+python ELECTROSCRIBE/main.py
 ```
 
 ## Features
@@ -55,7 +55,7 @@ python H_SCRIBE/main.py
 
 ## Project Structure
 
-Projects are stored in `H_SCRIBE/PROJECTS/` directory. Each project is a folder containing:
+Projects are stored in `ELECTROSCRIBE/PROJECTS/` directory. Each project is a folder containing:
 - `<project_name>.hd` - HEIDIC source file
 - `<project_name>.cpp` - Generated C++ code
 - `<system_name>_hot.dll.cpp` - Hot-reloadable DLL source (if `@hot` systems exist)

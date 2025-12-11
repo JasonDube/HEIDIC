@@ -77,15 +77,15 @@ build/
 *.bak
 *.tmp
 
-# H_SCRIBE projects (user-generated code)
-H_SCRIBE/PROJECTS/**/*.cpp
-H_SCRIBE/PROJECTS/**/*.exe
-H_SCRIBE/PROJECTS/**/*.dll
-H_SCRIBE/PROJECTS/**/*.dll.old
-H_SCRIBE/PROJECTS/**/*.dll.new
-H_SCRIBE/PROJECTS/**/*.a
+# ELECTROSCRIBE projects (user-generated code)
+ELECTROSCRIBE/PROJECTS/**/*.cpp
+ELECTROSCRIBE/PROJECTS/**/*.exe
+ELECTROSCRIBE/PROJECTS/**/*.dll
+ELECTROSCRIBE/PROJECTS/**/*.dll.old
+ELECTROSCRIBE/PROJECTS/**/*.dll.new
+ELECTROSCRIBE/PROJECTS/**/*.a
 # But keep .hd files (source code)
-!H_SCRIBE/PROJECTS/**/*.hd
+!ELECTROSCRIBE/PROJECTS/**/*.hd
 
 # Examples build artifacts
 examples/**/*.exe
@@ -108,8 +108,8 @@ user_questions.md
 # Ollama models (stored elsewhere by Ollama)
 # No need to track these
 
-# H_SCRIBE empty template
-H_SCRIBE/empty.hd
+# ELECTROSCRIBE empty template
+ELECTROSCRIBE/empty.hd
 
 
 .aider*

@@ -1445,16 +1445,21 @@ impl CodeGenerator {
                     }
                     let arg_expr = self.generate_expression(arg);
                     
-                    // For heidic_init_renderer_dds_quad, string literals are fine (auto-convert to const char*)
-                    // If it's a string variable, we'd need .c_str(), but string literals work directly
-                    // Handle string literals for GLFW functions that need const char*
-                    if (name == "glfwCreateWindow" && i == 2) || 
-                       (name == "glfwSetWindowTitle" && i == 1) ||
-                       (name == "heidic_init_renderer_dds_quad" && i == 1) {
-                        // String literals are fine as-is for const char*
-                        // String variables would need .c_str() but user is passing literal
-                        output.push_str(&arg_expr);
+                    // Check if this is a string variable being passed to a const char* parameter
+                    // String literals auto-convert, but string variables need .c_str()
+                    let is_string_var_to_const_char = matches!(arg, Expression::Variable(_)) && (
+                        (name == "glfwCreateWindow" && i == 2) ||
+                        (name == "glfwSetWindowTitle" && i == 1) ||
+                        (name == "heidic_init_renderer_dds_quad" && i == 1) ||
+                        (name == "neuroshell_load_font" && i == 0) ||
+                        (name == "neuroshell_create_text" && i == 2)
+                    );
+                    
+                    if is_string_var_to_const_char {
+                        // String variable passed to const char* - need .c_str()
+                        output.push_str(&format!("{}.c_str()", arg_expr));
                     } else {
+                        // String literal or other type - fine as-is
                         output.push_str(&arg_expr);
                     }
                 }

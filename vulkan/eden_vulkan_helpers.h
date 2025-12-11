@@ -22,6 +22,11 @@ int heidic_init_renderer(GLFWwindow* window);
 // Render a frame (renders a spinning triangle)
 void heidic_render_frame(GLFWwindow* window);
 
+// Get current command buffer (for UI rendering within render pass)
+// Returns current command buffer if render pass is active, VK_NULL_HANDLE otherwise
+// Note: Only valid during heidic_render_frame() execution
+void* heidic_get_current_command_buffer();
+
 // Cleanup renderer resources
 void heidic_cleanup_renderer();
 
@@ -82,6 +87,14 @@ int heidic_init_renderer_obj_mesh_with_resources(GLFWwindow* window, void* meshR
 void heidic_render_obj_mesh(GLFWwindow* window);
 // Cleanup OBJ mesh renderer
 void heidic_cleanup_renderer_obj_mesh();
+
+// UI Window Manager functions (optional - for game interface windows)
+// These functions are only available if UI windows are enabled in project config
+bool ui_manager_init();
+bool ui_manager_is_enabled();
+void ui_manager_update();
+void ui_manager_render();
+void ui_manager_shutdown();
 
 #ifdef __cplusplus
 }
