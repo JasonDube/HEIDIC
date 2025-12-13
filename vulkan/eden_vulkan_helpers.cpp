@@ -304,6 +304,30 @@ extern "C" void heidic_glfw_vulkan_hints() {
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 }
 
+// Create a fullscreen window on the primary monitor
+extern "C" GLFWwindow* heidic_create_fullscreen_window(const char* title) {
+    GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+    if (!monitor) {
+        std::cerr << "[GLFW] ERROR: Could not get primary monitor!" << std::endl;
+        return nullptr;
+    }
+    
+    const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+    if (!mode) {
+        std::cerr << "[GLFW] ERROR: Could not get video mode!" << std::endl;
+        return nullptr;
+    }
+    
+    std::cout << "[GLFW] Creating fullscreen window: " << mode->width << "x" << mode->height << std::endl;
+    
+    // Create fullscreen window with monitor's native resolution
+    GLFWwindow* window = glfwCreateWindow(mode->width, mode->height, title, monitor, nullptr);
+    if (!window) {
+        std::cerr << "[GLFW] ERROR: Failed to create fullscreen window!" << std::endl;
+    }
+    return window;
+}
+
 // Initialize Vulkan renderer
 extern "C" int heidic_init_renderer(GLFWwindow* window) {
     if (window == nullptr) {
@@ -2132,11 +2156,15 @@ static VkDeviceMemory g_fpsCubeIndexBufferMemory = VK_NULL_HANDLE;
 static uint32_t g_fpsCubeIndexCount = 0;
 
 // Colored reference cubes (1x1x1 cubes for spatial reference)
-static VkBuffer g_coloredCubeVertexBuffers[15] = {VK_NULL_HANDLE};  // Increased to 15 (9 big + 5 small + 1 extra)
-static VkDeviceMemory g_coloredCubeVertexBufferMemory[15] = {VK_NULL_HANDLE};
+static VkBuffer g_coloredCubeVertexBuffers[19] = {VK_NULL_HANDLE};  // 9 big + 5 small + 1 rectangle + 1 pink block + 1 ground + 1 building
+static VkDeviceMemory g_coloredCubeVertexBufferMemory[19] = {VK_NULL_HANDLE};
 static int g_numColoredCubes = 0;
-// Store cube sizes (1.0 for big cubes, 0.5 for small cubes)
-static float g_coloredCubeSizes[15] = {0.0f};
+// Store cube sizes (1.0 for big cubes, 0.5 for small cubes, or per-axis for rectangles)
+static float g_coloredCubeSizes[19] = {0.0f};
+// Store per-axis sizes for non-uniform shapes (x, y, z)
+static float g_coloredCubeSizeX[19] = {0.0f};
+static float g_coloredCubeSizeY[19] = {0.0f};
+static float g_coloredCubeSizeZ[19] = {0.0f};
 
 // FPS Camera matrices for raycasting (updated each frame in heidic_render_fps)
 static glm::mat4 g_fpsCurrentView = glm::mat4(1.0f);
@@ -2154,6 +2182,33 @@ struct ColoredCubeColor {
     float r, g, b;
 };
 static std::vector<ColoredCubeColor> g_coloredCubeOriginalColors;
+
+// Store cube rotations (yaw in degrees, for visual rotation around Y axis)
+static std::vector<float> g_coloredCubeRotations;
+
+// Attachment system: track which cubes are attached to the vehicle (index 14)
+// When a cube is attached, it moves and rotates with the vehicle
+struct AttachedCubeData {
+    bool attached = false;      // Whether this cube is attached to vehicle
+    float local_x = 0.0f;       // Local X offset from vehicle center (in vehicle-local space)
+    float local_y = 0.0f;       // Local Y offset from vehicle top
+    float local_z = 0.0f;       // Local Z offset from vehicle center (in vehicle-local space)
+};
+static std::vector<AttachedCubeData> g_attachedCubes;
+
+// Item properties system - for scavenging/trading/building gameplay
+// Each cube can have item properties that define what it is, its value, etc.
+struct ItemProperties {
+    int item_type_id = 0;       // Unique item type ID (0 = generic block, 1 = water_crate, 2 = engine_part, etc.)
+    std::string item_name = ""; // Item name/display name (e.g., "Junk Skiff", "Barker's GyroHelm")
+    float trade_value = 0.0f;   // Trade value/price (0 = not tradeable)
+    float condition = 1.0f;     // Condition/durability (0.0 to 1.0, 1.0 = perfect, 0.0 = broken)
+    float weight = 1.0f;        // Weight/mass (for physics/inventory)
+    int category = 0;           // Category: 0=generic, 1=consumable, 2=part, 3=resource, 4=scrap
+    bool is_salvaged = false;   // Whether this item was salvaged from a destroyed ship
+    int parent_index = -1;      // Parent cube index (-1 = no parent, otherwise this is a child of that cube)
+};
+static std::vector<ItemProperties> g_itemProperties;
 
 // Floor cube vertices - EXACT COPY of spinning cube vertices, just with gray colors
 // Using -1.0 to 1.0 range like spinning cube (will scale via model matrix)
@@ -2269,24 +2324,87 @@ extern "C" int heidic_init_renderer_fps(GLFWwindow* window) {
         {2.0f, 0.25f, -2.0f, 0.2f, 0.2f, 0.8f}, // Small blue on floor
         {-2.0f, 0.25f, -2.0f, 0.8f, 0.8f, 0.2f},  // Small yellow on floor
         {0.0f, 0.25f, 0.0f, 0.8f, 0.2f, 0.8f}, // Small magenta on floor (at origin)
+        // Blue rectangle: 1 unit tall, 4 units wide, 10 units long - positioned away from other blocks
+        {15.0f, 0.5f, 0.0f, 0.0f, 0.0f, 1.0f},  // Blue rectangle at +15X (away from other cubes)
+        // Pink block on top of vehicle (0.5x0.5x0.5, positioned near edge of short end)
+        // Vehicle is 10 units long (Z), so short end is at Z edges. Place at +Z edge: vehicle_z + length/2 - block_size/2
+        {15.0f, 1.25f, 4.75f, 1.0f, 0.5f, 0.5f},  // Pink block at +Z edge of vehicle (0.0 + 5.0 - 0.25 = 4.75, on top at 1.25)
+        // Ground cube at 500 meters away (same size as starting floor: 50x1x50, same Y level)
+        {500.0f, 0.5f, 0.0f, 0.5f, 0.5f, 0.5f},  // Gray ground cube at +500X (50x1x50 size, will be set below)
+        // Yellow building on top of ground cube (20x20x50)
+        {500.0f, 25.0f, 0.0f, 1.0f, 1.0f, 0.0f},  // Yellow building at +500X, 25 units up (half of 50 height)
     };
     
     g_numColoredCubes = static_cast<int>(referenceCubes.size());
     
-    // Initialize global cube positions array and store original colors
+    // Initialize global cube positions array, store original colors, initialize rotations, attachment data, and item properties
     g_coloredCubePositions.clear();
     g_coloredCubeOriginalColors.clear();
+    g_coloredCubeRotations.clear();
+    g_attachedCubes.clear();
+    g_itemProperties.clear();
     for (int i = 0; i < g_numColoredCubes; i++) {
         const auto& cube = referenceCubes[i];
         g_coloredCubePositions.push_back({cube.x, cube.y, cube.z});
         g_coloredCubeOriginalColors.push_back({cube.r, cube.g, cube.b});
-        // First 9 cubes are big (1.0), rest are small (0.5)
-        g_coloredCubeSizes[i] = (i < 9) ? 1.0f : 0.5f;
+        g_coloredCubeRotations.push_back(0.0f);  // Initialize rotation to 0 degrees
+        g_attachedCubes.push_back({false, 0.0f, 0.0f, 0.0f});  // Initialize as not attached
+        
+        // Initialize item properties (all start as generic blocks)
+        ItemProperties props;
+        props.item_type_id = 0;      // 0 = generic block
+        props.item_name = "";        // Empty name by default
+        props.trade_value = 0.0f;    // Not tradeable by default
+        props.condition = 1.0f;      // Perfect condition
+        props.weight = 1.0f;         // Default weight
+        props.category = 0;          // Generic category
+        props.is_salvaged = false;   // Not salvaged
+        props.parent_index = -1;     // No parent by default
+        g_itemProperties.push_back(props);
+        
+        // Set sizes: first 9 are big (1.0), next 5 are small (0.5), last one is rectangle
+        if (i < 9) {
+            // Big cubes: 1x1x1
+            g_coloredCubeSizes[i] = 1.0f;
+            g_coloredCubeSizeX[i] = 1.0f;
+            g_coloredCubeSizeY[i] = 1.0f;
+            g_coloredCubeSizeZ[i] = 1.0f;
+        } else if (i < 14) {
+            // Small cubes: 0.5x0.5x0.5
+            g_coloredCubeSizes[i] = 0.5f;
+            g_coloredCubeSizeX[i] = 0.5f;
+            g_coloredCubeSizeY[i] = 0.5f;
+            g_coloredCubeSizeZ[i] = 0.5f;
+        } else if (i == 14) {
+            // Blue rectangle: 4 units wide (X), 1 unit tall (Y), 10 units long (Z)
+            g_coloredCubeSizes[i] = 1.0f;  // Average size for compatibility
+            g_coloredCubeSizeX[i] = 4.0f;  // Width
+            g_coloredCubeSizeY[i] = 1.0f;  // Height
+            g_coloredCubeSizeZ[i] = 10.0f; // Length
+        } else if (i == 15) {
+            // Pink block on vehicle: 0.5x0.5x0.5
+            g_coloredCubeSizes[i] = 0.5f;
+            g_coloredCubeSizeX[i] = 0.5f;
+            g_coloredCubeSizeY[i] = 0.5f;
+            g_coloredCubeSizeZ[i] = 0.5f;
+        } else if (i == 16) {
+            // Ground cube: 50x1x50 (same size as starting floor cube: 50 units wide, 1 unit tall, 50 units deep)
+            g_coloredCubeSizes[i] = 1.0f;  // Average size for compatibility
+            g_coloredCubeSizeX[i] = 50.0f; // Width (same as starting floor)
+            g_coloredCubeSizeY[i] = 1.0f;  // Height (same as floor)
+            g_coloredCubeSizeZ[i] = 50.0f; // Depth (same as starting floor)
+        } else if (i == 17) {
+            // Yellow building: 20x20x50 (20 units wide, 20 units deep, 50 units tall)
+            g_coloredCubeSizes[i] = 20.0f;  // Average size for compatibility
+            g_coloredCubeSizeX[i] = 20.0f;  // Width
+            g_coloredCubeSizeY[i] = 50.0f;  // Height (50 feet tall)
+            g_coloredCubeSizeZ[i] = 20.0f;  // Depth
+        }
     }
     
     // Create vertex buffers for each colored cube
     // Note: All vertices are created at size 1.0 (from -0.5 to 0.5), scaling is done in model matrix
-    for (int i = 0; i < g_numColoredCubes && i < 15; i++) {
+    for (int i = 0; i < g_numColoredCubes && i < 19; i++) {
         // Create cube vertices with the specified color (always size 1.0, scaled in model matrix)
         std::vector<Vertex> coloredCubeVertices = {
             {{-0.5f, -0.5f,  0.5f}, {referenceCubes[i].r, referenceCubes[i].g, referenceCubes[i].b}},
@@ -2311,6 +2429,49 @@ extern "C" int heidic_init_renderer_fps(GLFWwindow* window) {
     }
     
     std::cout << "[FPS] Created " << g_numColoredCubes << " colored reference cubes" << std::endl;
+    
+    // Initialize item properties for ALL cubes
+    // Big cubes (0-4): Cargo containers with item type IDs 100-104
+    const char* big_cube_names[] = {"Red Cargo Crate", "Green Cargo Crate", "Blue Cargo Crate", "Yellow Cargo Crate", "Orange Cargo Crate"};
+    for (int i = 0; i < 5 && i < g_numColoredCubes; i++) {
+        g_itemProperties[i].item_name = big_cube_names[i];
+        g_itemProperties[i].item_type_id = 100 + i;  // 100, 101, 102, 103, 104
+    }
+    
+    // Small cubes (5-13): Components with item type IDs 200-208
+    const char* small_cube_names[] = {"Power Cell", "Circuit Board", "Fuel Injector", "Plasma Coil", "Nav Module", 
+                                       "Thruster Nozzle", "Shield Emitter", "Sensor Array", "Comm Relay"};
+    for (int i = 5; i < 14 && i < g_numColoredCubes; i++) {
+        g_itemProperties[i].item_name = small_cube_names[i - 5];
+        g_itemProperties[i].item_type_id = 200 + (i - 5);  // 200, 201, 202, 203, 204, 205, 206, 207, 208
+    }
+    
+    // Vehicle (index 14): "Junk Skiff" - special item type ID 1
+    if (g_numColoredCubes > 14) {
+        g_itemProperties[14].item_name = "Junk Skiff";
+        g_itemProperties[14].item_type_id = 1;  // Vehicle type
+    }
+    
+    // Helm (index 15): "Barker's GyroHelm" - child of vehicle, special item type ID 2
+    if (g_numColoredCubes > 15) {
+        g_itemProperties[15].item_name = "Barker's GyroHelm";
+        g_itemProperties[15].item_type_id = 2;  // Helm type
+        g_itemProperties[15].parent_index = 14; // Child of vehicle (parent-child relationship)
+    }
+    
+    // Ground cube (index 16): Generic ground/platform - no special item type
+    if (g_numColoredCubes > 16) {
+        g_itemProperties[16].item_name = "Ground Platform";
+        g_itemProperties[16].item_type_id = 0;  // Generic (not targetable)
+    }
+    
+    // Building (index 17): Yellow building - item type "building"
+    if (g_numColoredCubes > 17) {
+        g_itemProperties[17].item_name = "building";
+        g_itemProperties[17].item_type_id = 300;  // Building type ID
+    }
+    
+    std::cout << "[FPS] Initialized item properties for all cubes" << std::endl;
     
     // Load shaders - FORCE use of cube shaders (same as working spinning cube)
     std::vector<char> vertShaderCode, fragShaderCode;
@@ -2591,7 +2752,7 @@ extern "C" void heidic_render_fps(GLFWwindow* window, float camera_pos_x, float 
     float fov = 70.0f * 3.14159f / 180.0f;
     float aspect = (float)g_swapchainExtent.width / (float)g_swapchainExtent.height;
     float nearPlane = 0.1f;
-    float farPlane = 100.0f;
+    float farPlane = 2000.0f;  // Increased to 2000 to see objects 500+ meters away
     ubo.proj = mat4_perspective(fov, aspect, nearPlane, farPlane);
     
     // Vulkan clip space has inverted Y and half Z - modify directly like spinning cube
@@ -2646,12 +2807,21 @@ extern "C" void heidic_render_fps(GLFWwindow* window, float camera_pos_x, float 
             continue;
         }
         
-        // Model matrix: cube at the specified position
-        // Note: Vertices are created at size 1.0, so we need to scale them to the actual cube size
-        float cubeSize = g_coloredCubeSizes[i];
+        // Model matrix: cube at the specified position with rotation
+        // Note: Vertices are created at size 1.0, so we need to scale them to the actual size
+        // Use per-axis sizes if available, otherwise use uniform size
+        // Transform order: translate, rotate (around Y axis), scale
+        float scaleX = g_coloredCubeSizeX[i] > 0.0f ? g_coloredCubeSizeX[i] : g_coloredCubeSizes[i];
+        float scaleY = g_coloredCubeSizeY[i] > 0.0f ? g_coloredCubeSizeY[i] : g_coloredCubeSizes[i];
+        float scaleZ = g_coloredCubeSizeZ[i] > 0.0f ? g_coloredCubeSizeZ[i] : g_coloredCubeSizes[i];
         glm::mat4 cubeModel = glm::mat4(1.0f);
         cubeModel = glm::translate(cubeModel, glm::vec3(g_coloredCubePositions[i].x, g_coloredCubePositions[i].y, g_coloredCubePositions[i].z));
-        cubeModel = glm::scale(cubeModel, glm::vec3(cubeSize, cubeSize, cubeSize));  // Scale to actual cube size
+        // Apply rotation around Y axis (yaw) if cube has rotation set
+        if (i < static_cast<int>(g_coloredCubeRotations.size()) && g_coloredCubeRotations[i] != 0.0f) {
+            float yaw_rad = g_coloredCubeRotations[i] * 3.14159f / 180.0f;  // Convert degrees to radians
+            cubeModel = glm::rotate(cubeModel, yaw_rad, glm::vec3(0.0f, 1.0f, 0.0f));
+        }
+        cubeModel = glm::scale(cubeModel, glm::vec3(scaleX, scaleY, scaleZ));  // Scale to actual size (supports non-uniform)
         
         // Push model matrix as push constant (each draw gets its own matrix)
         vkCmdPushConstants(g_commandBuffers[imageIndex], g_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &cubeModel);
@@ -2756,6 +2926,9 @@ extern "C" void heidic_cleanup_renderer_fps() {
         }
         g_numColoredCubes = 0;
         g_coloredCubePositions.clear();
+        g_coloredCubeRotations.clear();
+        g_attachedCubes.clear();
+        g_itemProperties.clear();
         
         if (g_fpsPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(g_device, g_fpsPipeline, nullptr);
@@ -2981,31 +3154,23 @@ extern "C" Vec3 heidic_get_cube_position(int cube_index) {
 
 // Set cube position (for HEIDIC to update picked-up cube)
 extern "C" void heidic_set_cube_position(int cube_index, float x, float y, float z) {
-    // ALWAYS print first call to verify function is being called
-    static bool first_call = true;
-    if (first_call) {
-        std::cout << "[CUBE_POS] Function called! cube_index=" << cube_index 
-                  << ", size=" << g_coloredCubePositions.size() << std::endl;
-        first_call = false;
-    }
-    
     if (cube_index >= 0 && cube_index < static_cast<int>(g_coloredCubePositions.size())) {
-        // Debug output (always print first few to verify function is called)
-        static int update_count = 0;
-        if (update_count < 20) {
-            std::cout << "[CUBE_POS] Updated cube " << cube_index << " from (" 
-                      << g_coloredCubePositions[cube_index].x << ", " 
-                      << g_coloredCubePositions[cube_index].y << ", " 
-                      << g_coloredCubePositions[cube_index].z << ") to (" 
-                      << x << ", " << y << ", " << z << ")" << std::endl;
-            update_count++;
-        }
         g_coloredCubePositions[cube_index].x = x;
         g_coloredCubePositions[cube_index].y = y;
         g_coloredCubePositions[cube_index].z = z;
     } else {
         std::cout << "[CUBE_POS] ERROR: Invalid cube_index " << cube_index 
                   << " (size=" << g_coloredCubePositions.size() << ")" << std::endl;
+    }
+}
+
+// Set cube rotation (yaw in degrees, for visual rotation around Y axis)
+extern "C" void heidic_set_cube_rotation(int cube_index, float yaw_degrees) {
+    if (cube_index >= 0 && cube_index < static_cast<int>(g_coloredCubeRotations.size())) {
+        g_coloredCubeRotations[cube_index] = yaw_degrees;
+    } else {
+        std::cout << "[CUBE_ROT] ERROR: Invalid cube_index " << cube_index 
+                  << " (size=" << g_coloredCubeRotations.size() << ")" << std::endl;
     }
 }
 
@@ -3040,6 +3205,202 @@ extern "C" void heidic_restore_cube_color(int cube_index) {
     if (cube_index >= 0 && cube_index < static_cast<int>(g_coloredCubeOriginalColors.size())) {
         const auto& original = g_coloredCubeOriginalColors[cube_index];
         heidic_set_cube_color(cube_index, original.r, original.g, original.b);
+    }
+}
+
+// ============================================================================
+// VEHICLE ATTACHMENT SYSTEM
+// ============================================================================
+
+// Attach a cube to the vehicle (index 14)
+// local_x, local_y, local_z are the offset from vehicle center in vehicle-local space
+extern "C" void heidic_attach_cube_to_vehicle(int cube_index, float local_x, float local_y, float local_z) {
+    if (cube_index >= 0 && cube_index < static_cast<int>(g_attachedCubes.size())) {
+        g_attachedCubes[cube_index].attached = true;
+        g_attachedCubes[cube_index].local_x = local_x;
+        g_attachedCubes[cube_index].local_y = local_y;
+        g_attachedCubes[cube_index].local_z = local_z;
+        
+        // Set parent relationship (vehicle is index 14)
+        if (cube_index >= 0 && cube_index < static_cast<int>(g_itemProperties.size())) {
+            g_itemProperties[cube_index].parent_index = 14;  // Vehicle is parent
+        }
+        
+        std::cout << "[ATTACH] Cube " << cube_index << " attached to vehicle (parent: 14) with local offset ("
+                  << local_x << ", " << local_y << ", " << local_z << ")" << std::endl;
+    }
+}
+
+// Detach a cube from the vehicle
+extern "C" void heidic_detach_cube_from_vehicle(int cube_index) {
+    if (cube_index >= 0 && cube_index < static_cast<int>(g_attachedCubes.size())) {
+        if (g_attachedCubes[cube_index].attached) {
+            g_attachedCubes[cube_index].attached = false;
+            
+            // Clear parent relationship (unless it's the helm, which should always be child of vehicle)
+            if (cube_index >= 0 && cube_index < static_cast<int>(g_itemProperties.size()) && cube_index != 15) {
+                g_itemProperties[cube_index].parent_index = -1;  // No parent
+            }
+            
+            std::cout << "[ATTACH] Cube " << cube_index << " detached from vehicle" << std::endl;
+        }
+    }
+}
+
+// Check if a cube is attached to the vehicle (returns 1 if attached, 0 if not)
+extern "C" int heidic_is_cube_attached(int cube_index) {
+    if (cube_index >= 0 && cube_index < static_cast<int>(g_attachedCubes.size())) {
+        return g_attachedCubes[cube_index].attached ? 1 : 0;
+    }
+    return 0;
+}
+
+// ============================================================================
+// ITEM PROPERTIES SYSTEM (for scavenging/trading/building)
+// ============================================================================
+
+// Set item properties for a cube
+extern "C" void heidic_set_item_properties(int cube_index, int item_type_id, float trade_value, float condition, float weight, int category, int is_salvaged) {
+    if (cube_index >= 0 && cube_index < static_cast<int>(g_itemProperties.size())) {
+        g_itemProperties[cube_index].item_type_id = item_type_id;
+        g_itemProperties[cube_index].trade_value = trade_value;
+        g_itemProperties[cube_index].condition = condition;
+        g_itemProperties[cube_index].weight = weight;
+        g_itemProperties[cube_index].category = category;
+        g_itemProperties[cube_index].is_salvaged = (is_salvaged != 0);
+    }
+}
+
+// Get item type ID for a cube
+extern "C" int heidic_get_item_type_id(int cube_index) {
+    if (cube_index >= 0 && cube_index < static_cast<int>(g_itemProperties.size())) {
+        return g_itemProperties[cube_index].item_type_id;
+    }
+    return 0;
+}
+
+// Get trade value for a cube
+extern "C" float heidic_get_item_trade_value(int cube_index) {
+    if (cube_index >= 0 && cube_index < static_cast<int>(g_itemProperties.size())) {
+        return g_itemProperties[cube_index].trade_value;
+    }
+    return 0.0f;
+}
+
+// Get condition for a cube (0.0 to 1.0)
+extern "C" float heidic_get_item_condition(int cube_index) {
+    if (cube_index >= 0 && cube_index < static_cast<int>(g_itemProperties.size())) {
+        return g_itemProperties[cube_index].condition;
+    }
+    return 1.0f;
+}
+
+// Get weight for a cube
+extern "C" float heidic_get_item_weight(int cube_index) {
+    if (cube_index >= 0 && cube_index < static_cast<int>(g_itemProperties.size())) {
+        return g_itemProperties[cube_index].weight;
+    }
+    return 1.0f;
+}
+
+// Get category for a cube (0=generic, 1=consumable, 2=part, 3=resource, 4=scrap)
+extern "C" int heidic_get_item_category(int cube_index) {
+    if (cube_index >= 0 && cube_index < static_cast<int>(g_itemProperties.size())) {
+        return g_itemProperties[cube_index].category;
+    }
+    return 0;
+}
+
+// Check if item is salvaged
+extern "C" int heidic_is_item_salvaged(int cube_index) {
+    if (cube_index >= 0 && cube_index < static_cast<int>(g_itemProperties.size())) {
+        return g_itemProperties[cube_index].is_salvaged ? 1 : 0;
+    }
+    return 0;
+}
+
+// Set item name (string)
+extern "C" void heidic_set_item_name(int cube_index, const char* item_name) {
+    if (cube_index >= 0 && cube_index < static_cast<int>(g_itemProperties.size())) {
+        g_itemProperties[cube_index].item_name = item_name ? item_name : "";
+    }
+}
+
+// Get item name (returns pointer to static string - safe for HEIDIC to copy)
+// NOTE: Returns a pointer to a static string that gets updated each call.
+// HEIDIC will copy this string immediately, so it's safe.
+extern "C" const char* heidic_get_item_name(int cube_index) {
+    static std::string result_string = "";
+    
+    if (cube_index >= 0 && cube_index < static_cast<int>(g_itemProperties.size())) {
+        const std::string& name = g_itemProperties[cube_index].item_name;
+        if (!name.empty()) {
+            // Copy to static string to ensure pointer remains valid
+            result_string = name;
+            return result_string.c_str();
+        } else {
+            // If name is empty, return item type ID as fallback
+            int item_type_id = g_itemProperties[cube_index].item_type_id;
+            if (item_type_id > 0) {
+                result_string = "Item #" + std::to_string(item_type_id);
+                return result_string.c_str();
+            }
+        }
+    }
+    
+    // Return empty string
+    result_string = "";
+    return result_string.c_str();
+}
+
+// Set parent cube index (for hierarchical relationships)
+extern "C" void heidic_set_item_parent(int cube_index, int parent_index) {
+    if (cube_index >= 0 && cube_index < static_cast<int>(g_itemProperties.size())) {
+        g_itemProperties[cube_index].parent_index = parent_index;
+    }
+}
+
+// Get parent cube index (-1 = no parent)
+extern "C" int heidic_get_item_parent(int cube_index) {
+    if (cube_index >= 0 && cube_index < static_cast<int>(g_itemProperties.size())) {
+        return g_itemProperties[cube_index].parent_index;
+    }
+    return -1;
+}
+
+// Update all attached cubes to match the vehicle's position and rotation
+// vehicle_x/y/z: vehicle center position
+// vehicle_yaw: vehicle yaw in degrees
+// vehicle_size_y: vehicle height (to calculate top surface)
+extern "C" void heidic_update_attached_cubes(float vehicle_x, float vehicle_y, float vehicle_z, float vehicle_yaw, float vehicle_size_y) {
+    float yaw_rad = vehicle_yaw * 3.14159f / 180.0f;
+    float cos_yaw = cosf(yaw_rad);
+    float sin_yaw = sinf(yaw_rad);
+    float vehicle_top = vehicle_y + (vehicle_size_y / 2.0f);
+    
+    for (int i = 0; i < static_cast<int>(g_attachedCubes.size()); i++) {
+        if (g_attachedCubes[i].attached) {
+            // Rotate local offset by vehicle yaw to get world offset
+            // x' = local_x * cos(yaw) + local_z * sin(yaw)
+            // z' = -local_x * sin(yaw) + local_z * cos(yaw)
+            float world_offset_x = g_attachedCubes[i].local_x * cos_yaw + g_attachedCubes[i].local_z * sin_yaw;
+            float world_offset_z = -g_attachedCubes[i].local_x * sin_yaw + g_attachedCubes[i].local_z * cos_yaw;
+            
+            // Calculate world position
+            float new_x = vehicle_x + world_offset_x;
+            float new_y = vehicle_top + g_attachedCubes[i].local_y;
+            float new_z = vehicle_z + world_offset_z;
+            
+            // Update cube position
+            g_coloredCubePositions[i].x = new_x;
+            g_coloredCubePositions[i].y = new_y;
+            g_coloredCubePositions[i].z = new_z;
+            
+            // Update cube rotation to match vehicle
+            if (i < static_cast<int>(g_coloredCubeRotations.size())) {
+                g_coloredCubeRotations[i] = vehicle_yaw;
+            }
+        }
     }
 }
 
@@ -3081,23 +3442,36 @@ extern "C" int heidic_raycast_downward_big_cube(float x, float y, float z) {
     int closestHitIndex = -1;
     float closestT = 1000.0f;  // Large initial distance
     
-    // Test all big cubes (first 9 cubes, size >= 1.0)
-    for (int i = 0; i < g_numColoredCubes && i < 9; i++) {
-        if (g_coloredCubeSizes[i] >= 1.0f) {  // Only check big cubes
-            float cubeSize = g_coloredCubeSizes[i];
-            AABB cubeBox = createCubeAABB(
-                g_coloredCubePositions[i].x,
-                g_coloredCubePositions[i].y,
-                g_coloredCubePositions[i].z,
-                cubeSize, cubeSize, cubeSize
-            );
-            
-            float tMin, tMax;
-            if (rayAABB(rayOrigin, rayDir, cubeBox, tMin, tMax)) {
-                if (tMin >= 0.0f && tMin < closestT) {
-                    closestT = tMin;
-                    closestHitIndex = i;
-                }
+    // Test all cubes (check all cubes, not just first 9)
+    // Skip vehicle (index 14), helm (index 15), and ground platform (index 16) as they're special
+    // But include building (index 17) and all other cubes
+    for (int i = 0; i < g_numColoredCubes; i++) {
+        // Skip vehicle, helm, and ground platform (they're handled separately or shouldn't be stepped on)
+        if (i == 14 || i == 15 || i == 16) {
+            continue;
+        }
+        
+        // Check if cube has size >= 1.0 (big cube) or use per-axis sizes for rectangles
+        float cubeSize = g_coloredCubeSizes[i];
+        float sizeX = g_coloredCubeSizeX[i];
+        float sizeY = g_coloredCubeSizeY[i];
+        float sizeZ = g_coloredCubeSizeZ[i];
+        
+        // Use per-axis sizes if available (for rectangles), otherwise use uniform size
+        AABB cubeBox = createCubeAABB(
+            g_coloredCubePositions[i].x,
+            g_coloredCubePositions[i].y,
+            g_coloredCubePositions[i].z,
+            sizeX > 0.0f ? sizeX : cubeSize,
+            sizeY > 0.0f ? sizeY : cubeSize,
+            sizeZ > 0.0f ? sizeZ : cubeSize
+        );
+        
+        float tMin, tMax;
+        if (rayAABB(rayOrigin, rayDir, cubeBox, tMin, tMax)) {
+            if (tMin >= 0.0f && tMin < closestT) {
+                closestT = tMin;
+                closestHitIndex = i;
             }
         }
     }
@@ -3105,12 +3479,23 @@ extern "C" int heidic_raycast_downward_big_cube(float x, float y, float z) {
     return closestHitIndex;
 }
 
-// Get cube size (1.0 for big, 0.5 for small)
+// Get cube size (1.0 for big, 0.5 for small, or average for rectangles)
 extern "C" float heidic_get_cube_size(int cube_index) {
     if (cube_index >= 0 && cube_index < g_numColoredCubes) {
         return g_coloredCubeSizes[cube_index];
     }
     return 0.0f;
+}
+
+// Get cube size per axis (for rectangles)
+extern "C" Vec3 heidic_get_cube_size_xyz(int cube_index) {
+    Vec3 result = {0.0f, 0.0f, 0.0f};
+    if (cube_index >= 0 && cube_index < g_numColoredCubes) {
+        result.x = g_coloredCubeSizeX[cube_index] > 0.0f ? g_coloredCubeSizeX[cube_index] : g_coloredCubeSizes[cube_index];
+        result.y = g_coloredCubeSizeY[cube_index] > 0.0f ? g_coloredCubeSizeY[cube_index] : g_coloredCubeSizes[cube_index];
+        result.z = g_coloredCubeSizeZ[cube_index] > 0.0f ? g_coloredCubeSizeZ[cube_index] : g_coloredCubeSizes[cube_index];
+    }
+    return result;
 }
 
 // Get ray origin and direction from screen center (for debug visualization)

@@ -2403,7 +2403,8 @@ impl CodeGenerator {
                         (name == "glfwSetWindowTitle" && i == 1) ||
                         (name == "heidic_init_renderer_dds_quad" && i == 1) ||
                         (name == "neuroshell_load_font" && i == 0) ||
-                        (name == "neuroshell_create_text" && i == 2)
+                        (name == "neuroshell_create_text" && i == 2) ||
+                        (name == "neuroshell_set_text_string" && i == 1)
                     );
                     
                     if is_string_var_to_const_char {

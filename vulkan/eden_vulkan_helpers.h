@@ -15,6 +15,10 @@ extern "C" {
 // Configure GLFW for Vulkan (call this before creating the window)
 void heidic_glfw_vulkan_hints();
 
+// Create a fullscreen window on the primary monitor
+// Returns GLFWwindow* or NULL on failure
+GLFWwindow* heidic_create_fullscreen_window(const char* title);
+
 // Initialize a basic renderer (returns 1 on success, 0 on failure)
 // This function handles all Vulkan setup internally
 int heidic_init_renderer(GLFWwindow* window);
@@ -113,17 +117,56 @@ Vec3 heidic_raycast_cube_hit_point_center(GLFWwindow* window, float cubeX, float
 Vec3 heidic_get_cube_position(int cube_index);
 // Set cube position (for HEIDIC to update picked-up cube)
 void heidic_set_cube_position(int cube_index, float x, float y, float z);
+// Set cube rotation (yaw in degrees, for visual rotation around Y axis)
+void heidic_set_cube_rotation(int cube_index, float yaw_degrees);
 // Set cube color (for visual feedback when selected/picked up) - bright white when selected
 void heidic_set_cube_color(int cube_index, float r, float g, float b);
 // Restore cube to original color
 void heidic_restore_cube_color(int cube_index);
+
+// Vehicle attachment system - for blocks that move with the vehicle
+// Attach a cube to the vehicle with a local offset (in vehicle-local space)
+void heidic_attach_cube_to_vehicle(int cube_index, float local_x, float local_y, float local_z);
+// Detach a cube from the vehicle
+void heidic_detach_cube_from_vehicle(int cube_index);
+// Check if a cube is attached to the vehicle (returns 1 if attached, 0 if not)
+int heidic_is_cube_attached(int cube_index);
+// Update all attached cubes to match the vehicle's position and rotation
+void heidic_update_attached_cubes(float vehicle_x, float vehicle_y, float vehicle_z, float vehicle_yaw, float vehicle_size_y);
+
+// Item properties system - for scavenging/trading/building gameplay
+// Set item properties for a cube (item_type_id, trade_value, condition 0-1, weight, category, is_salvaged 0/1)
+void heidic_set_item_properties(int cube_index, int item_type_id, float trade_value, float condition, float weight, int category, int is_salvaged);
+// Get item type ID (0 = generic block, 1+ = specific item types)
+int heidic_get_item_type_id(int cube_index);
+// Get trade value/price (0 = not tradeable)
+float heidic_get_item_trade_value(int cube_index);
+// Get condition/durability (0.0 to 1.0, 1.0 = perfect)
+float heidic_get_item_condition(int cube_index);
+// Get weight/mass
+float heidic_get_item_weight(int cube_index);
+// Get category (0=generic, 1=consumable, 2=part, 3=resource, 4=scrap)
+int heidic_get_item_category(int cube_index);
+// Check if item is salvaged (returns 1 if salvaged, 0 if not)
+int heidic_is_item_salvaged(int cube_index);
+// Set item name (string)
+void heidic_set_item_name(int cube_index, const char* item_name);
+// Get item name (returns pointer to internal string - valid until next call or cube deletion)
+const char* heidic_get_item_name(int cube_index);
+// Set parent cube index (for hierarchical relationships, -1 = no parent)
+void heidic_set_item_parent(int cube_index, int parent_index);
+// Get parent cube index (-1 = no parent)
+int heidic_get_item_parent(int cube_index);
+
 // Cast ray downward from position and return distance to floor (or -1 if no hit)
 float heidic_raycast_downward_distance(float x, float y, float z);
 // Cast ray downward from position and return index of big cube hit (or -1 if no hit or hit small cube)
 // Returns cube index if ray hits a big cube (size >= 1.0), -1 otherwise
 int heidic_raycast_downward_big_cube(float x, float y, float z);
-// Get cube size (1.0 for big, 0.5 for small)
+// Get cube size (1.0 for big, 0.5 for small, or average for rectangles)
 float heidic_get_cube_size(int cube_index);
+// Get cube size per axis (for rectangles)
+Vec3 heidic_get_cube_size_xyz(int cube_index);
 // Get ray origin and direction from screen center (for debug visualization)
 Vec3 heidic_get_center_ray_origin(GLFWwindow* window);
 Vec3 heidic_get_center_ray_dir(GLFWwindow* window);

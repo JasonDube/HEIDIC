@@ -58,6 +58,9 @@ pub struct TypeChecker {
     errors: Vec<(SourceLocation, String, Option<String>)>,  // (location, message, suggestion)
     error_reporter: Option<ErrorReporter>,
     frame_scoped_vars: std::collections::HashSet<String>,  // Track variables allocated via frame.alloc_array
+    // Track ALL variable declarations for better scope error messages
+    all_declared_vars: HashMap<String, SourceLocation>,  // Variable name -> declaration location
+    current_scope_depth: usize,  // Track nesting level for scope-aware errors
 }
 
 impl TypeChecker {
@@ -70,6 +73,8 @@ impl TypeChecker {
             errors: Vec::new(),
             error_reporter: None,
             frame_scoped_vars: std::collections::HashSet::new(),
+            all_declared_vars: HashMap::new(),
+            current_scope_depth: 0,
         }
     }
     
@@ -354,6 +359,9 @@ impl TypeChecker {
                 if self.is_frame_alloc_expression(value) {
                     self.frame_scoped_vars.insert(name.clone());
                 }
+                
+                // Track ALL variable declarations for better scope error messages
+                self.all_declared_vars.insert(name.clone(), *location);
                 
                 // If value type is Error, still add to symbol table as Error to allow recovery
                 if let Some(declared_type) = ty {
@@ -713,12 +721,24 @@ impl TypeChecker {
                 match self.symbols.get(name) {
                     Some(ty) => Ok(ty.clone()),
                     None => {
-                        // Find similar variable names
-                        let candidates: Vec<String> = self.symbols.keys().cloned().collect();
-                        let suggestion = if let Some(closest) = find_closest_match(name, &candidates, 3) {
-                            format!("Did you mean '{}'? Use: {}", closest, closest)
+                        // Check if variable was declared somewhere else (scope issue)
+                        let suggestion = if let Some(decl_location) = self.all_declared_vars.get(name) {
+                            // Variable was declared but is not in current scope
+                            // This means it was declared in a nested scope (like inside an if block)
+                            format!(
+                                "Variable '{}' was declared at line {}, but it's in a different scope.\n\
+                                 \x1b[36m💡 Fix:\x1b[0m Move the declaration (let {}: Type = ...) BEFORE the 'if' block\n\
+                                 \x1b[36m   so it's accessible in both the if block and where you're using it now.\x1b[0m",
+                                name, decl_location.line, name
+                            )
                         } else {
-                            format!("Did you mean to declare it first? Use: let {}: Type = value;", name)
+                            // Variable was never declared - check for typos
+                            let candidates: Vec<String> = self.symbols.keys().cloned().collect();
+                            if let Some(closest) = find_closest_match(name, &candidates, 3) {
+                                format!("Did you mean '{}'? Use: {}", closest, closest)
+                            } else {
+                                format!("Did you mean to declare it first? Use: let {}: Type = value;", name)
+                            }
                         };
                         
                         self.report_error(

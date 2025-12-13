@@ -11,6 +11,7 @@ extern fn heidic_get_cursor_x(window: GLFWwindow): f64;
 extern fn heidic_get_cursor_y(window: GLFWwindow): f64;
 extern fn glfwSetCursorPos(window: GLFWwindow, xpos: f64, ypos: f64): void;
 extern fn glfwSetInputMode(window: GLFWwindow, mode: i32, value: i32): void;
+extern fn heidic_create_fullscreen_window(title: string): GLFWwindow;
 extern fn heidic_hide_cursor(window: GLFWwindow): void;
 extern fn heidic_sin(radians: f32): f32;
 extern fn heidic_cos(radians: f32): f32;
@@ -23,22 +24,51 @@ extern fn neuroshell_update(delta_time: f32): void;
 extern fn neuroshell_shutdown(): void;
 extern fn neuroshell_is_enabled(): bool;
 extern fn neuroshell_create_image(x: f32, y: f32, width: f32, height: f32, texture_path: string): i32;
+extern fn neuroshell_create_panel(x: f32, y: f32, width: f32, height: f32): i32;
 extern fn neuroshell_set_visible(element_id: i32, visible: bool): void;
 extern fn neuroshell_set_depth(element_id: i32, depth: f32): void;
+extern fn neuroshell_set_color(element_id: i32, r: f32, g: f32, b: f32, a: f32): void;
+
+// Neuroshell Font System
+extern fn neuroshell_load_font(font_path: string): i32;
+extern fn neuroshell_create_text(x: f32, y: f32, text: string, font_id: i32, char_width: f32, char_height: f32): i32;
+extern fn neuroshell_set_text_string(element_id: i32, text: string): void;
 
 // Raycast and cube position functions (for pickup system)
 extern fn heidic_raycast_cube_hit_center(window: GLFWwindow, cube_x: f32, cube_y: f32, cube_z: f32, cube_sx: f32, cube_sy: f32, cube_sz: f32): i32;
 extern fn heidic_raycast_cube_hit_point_center(window: GLFWwindow, cube_x: f32, cube_y: f32, cube_z: f32, cube_sx: f32, cube_sy: f32, cube_sz: f32): Vec3;
 extern fn heidic_get_cube_position(cube_index: i32): Vec3;
 extern fn heidic_set_cube_position(cube_index: i32, x: f32, y: f32, z: f32): void;
+extern fn heidic_set_cube_rotation(cube_index: i32, yaw_degrees: f32): void;
 extern fn heidic_set_cube_color(cube_index: i32, r: f32, g: f32, b: f32): void;
 extern fn heidic_restore_cube_color(cube_index: i32): void;
+
+// Vehicle attachment system - for blocks that move with the vehicle
+extern fn heidic_attach_cube_to_vehicle(cube_index: i32, local_x: f32, local_y: f32, local_z: f32): void;
+extern fn heidic_detach_cube_from_vehicle(cube_index: i32): void;
+extern fn heidic_is_cube_attached(cube_index: i32): i32;
+extern fn heidic_update_attached_cubes(vehicle_x: f32, vehicle_y: f32, vehicle_z: f32, vehicle_yaw: f32, vehicle_size_y: f32): void;
+
 extern fn heidic_raycast_downward_distance(x: f32, y: f32, z: f32): f32;
 extern fn heidic_raycast_downward_big_cube(x: f32, y: f32, z: f32): i32;  // Returns cube index or -1
 extern fn heidic_get_cube_size(cube_index: i32): f32;
+extern fn heidic_get_cube_size_xyz(cube_index: i32): Vec3;  // Returns per-axis sizes (x, y, z)
 extern fn heidic_get_center_ray_origin(window: GLFWwindow): Vec3;
 extern fn heidic_get_center_ray_dir(window: GLFWwindow): Vec3;
 extern fn heidic_draw_line(x1: f32, y1: f32, z1: f32, x2: f32, y2: f32, z2: f32, r: f32, g: f32, b: f32): void;
+
+// Item properties system - for scavenging/trading/building gameplay
+extern fn heidic_set_item_properties(cube_index: i32, item_type_id: i32, trade_value: f32, condition: f32, weight: f32, category: i32, is_salvaged: i32): void;
+extern fn heidic_get_item_type_id(cube_index: i32): i32;
+extern fn heidic_get_item_trade_value(cube_index: i32): f32;
+extern fn heidic_get_item_condition(cube_index: i32): f32;
+extern fn heidic_get_item_weight(cube_index: i32): f32;
+extern fn heidic_get_item_category(cube_index: i32): i32;
+extern fn heidic_is_item_salvaged(cube_index: i32): i32;
+extern fn heidic_set_item_name(cube_index: i32, item_name: string): void;
+extern fn heidic_get_item_name(cube_index: i32): string;
+extern fn heidic_set_item_parent(cube_index: i32, parent_index: i32): void;
+extern fn heidic_get_item_parent(cube_index: i32): i32;
 
 // Camera state - using individual variables for now (struct literals not fully implemented)
 // position: Vec3
@@ -60,8 +90,9 @@ fn main(): void {
     print("GLFW initialized.\n");
     heidic_glfw_vulkan_hints();
     
-    print("Creating window (1280x720)...\n");
-    let window: GLFWwindow = glfwCreateWindow(1280, 720, "FPS Camera Test - WASD to move, Mouse to look", 0, 0);
+    print("Creating fullscreen window...\n");
+    // Create fullscreen window using helper function
+    let window: GLFWwindow = heidic_create_fullscreen_window("FPS Camera Test - WASD to move, Mouse to look");
     if window == 0 {
         print("Failed to create window!\n");
         glfwTerminate();
@@ -85,6 +116,9 @@ fn main(): void {
     print("Initializing Neuroshell...\n");
     let neuroshell_init_result: i32 = neuroshell_init(window);
     let crosshair_id: i32 = 0;
+    let target_text_id: i32 = 0;            // ID of the "TARGET" label text element
+    let target_item_id_text_id: i32 = 0;    // ID of the item type ID display text element (below TARGET)
+    let target_distance_text_id: i32 = 0;   // ID of the distance display text element (below item name)
     if (neuroshell_init_result == 0) {
         print("WARNING: Neuroshell initialization failed - crosshair will not be visible\n");
     } else {
@@ -106,6 +140,161 @@ fn main(): void {
         } else {
             print("WARNING: Failed to create crosshair image!\n");
         }
+        
+        // Load font for TARGET panel
+        print("Loading font for TARGET panel...\n");
+        let font_id: i32 = neuroshell_load_font("fonts/dbyte_2x.png");
+        if (font_id == 0) {
+            print("WARNING: Failed to load font for TARGET panel!\n");
+        } else {
+            print("Font loaded successfully!\n");
+            
+            // Create TARGET panel at bottom left
+            // Screen is 1280x720 (or fullscreen resolution), panel is 150x100
+            // In standard screen coords, Y=0 is top, so bottom is at Y = screen_height - panel_height
+            // For 720p: 720 - 100 = 620
+            // For fullscreen, we need to get the actual screen height, but for now use 620
+            let panel_width: f32 = 150.0;
+            let panel_height: f32 = 100.0;
+            let panel_x: f32 = 0.0;
+            // Panel at bottom: Y = screen_height - panel_height
+            // Since we're in fullscreen, try 620 for 720p, or adjust based on actual resolution
+            let panel_y: f32 = 620.0;  // Bottom: screen_height - 100 (assuming 720p or similar)
+            print("Creating TARGET panel at bottom left (0, 620) size 150x100\n");
+            let target_panel_id: i32 = neuroshell_create_panel(panel_x, panel_y, panel_width, panel_height);
+            
+            if (target_panel_id != 0) {
+                // Set panel color to near black (0.05, 0.05, 0.05) - slightly brighter for visibility
+                neuroshell_set_color(target_panel_id, 0.05, 0.05, 0.05, 1.0);
+                
+                // Set depth lower than crosshair but visible
+                neuroshell_set_depth(target_panel_id, 50.0);
+                
+                // Make sure panel is visible
+                neuroshell_set_visible(target_panel_id, true);
+                
+                print("TARGET panel created successfully!\n");
+                
+                // Create "TARGET" text at the top of the panel
+                // User says text is currently at bottom of panel, want it at top
+                // Text character height is 8 pixels
+                // If text Y represents top-left of text: use panel_y + margin (top of panel)
+                // If text Y represents bottom-left: use panel_y + panel_height - 8 - margin
+                let text_x: f32 = panel_x + 5.0;
+                // Put text at top of panel: panel_y is top edge of panel, so add small margin
+                let text_y: f32 = panel_y + 5.0;  // Top of panel + 5px margin
+                let target_text: string = "TARGET";
+                print("Creating TARGET text at (");
+                print(text_x);
+                print(", ");
+                print(text_y);
+                print(")\n");
+                // Create TARGET text and store ID
+                let local_target_text_id: i32 = neuroshell_create_text(text_x, text_y, target_text, font_id, 8.0, 8.0);
+                
+                if (local_target_text_id != 0) {
+                    // Set text color to white
+                    neuroshell_set_color(local_target_text_id, 1.0, 1.0, 1.0, 1.0);
+                    
+                    // Set depth higher than panel so text renders on top
+                    neuroshell_set_depth(local_target_text_id, 60.0);
+                    
+                    // Make sure text is visible
+                    neuroshell_set_visible(local_target_text_id, true);
+                    
+                    print("TARGET text created successfully! ID=");
+                    print(local_target_text_id);
+                    print("\n");
+                    
+                    // Store the ID in the top-level variable (accessible in main loop)
+                    // We'll assign it after the if block
+                    
+                    // Create second text element below "TARGET" to display item type ID
+                    // Position it below the "TARGET" text
+                    // text_y is at panel_y + 5.0 (top of panel + margin)
+                    // Item ID text should be below TARGET: text_y + 8 (char height) + 5 (margin) = text_y + 13
+                    let item_id_text_x: f32 = panel_x + 5.0;
+                    let item_id_text_y: f32 = text_y + 13.0;  // Below TARGET text (8px char height + 5px margin)
+                    let item_id_text: string = "---";  // Default text to make it visible
+                    print("Creating item ID text at (");
+                    print(item_id_text_x);
+                    print(", ");
+                    print(item_id_text_y);
+                    print(") with initial text: ");
+                    print(item_id_text);
+                    print("\n");
+                    let local_item_id_text_id: i32 = neuroshell_create_text(item_id_text_x, item_id_text_y, item_id_text, font_id, 8.0, 8.0);
+                    print("local_item_id_text_id = ");
+                    print(local_item_id_text_id);
+                    print("\n");
+                    
+                    // Declare distance text ID outside if block so it's accessible later
+                    let local_distance_text_id: i32 = 0;
+                    
+                    if (local_item_id_text_id != 0) {
+                        // Set text color to white
+                        neuroshell_set_color(local_item_id_text_id, 1.0, 1.0, 1.0, 1.0);
+                        
+                        // Set depth higher than panel so text renders on top
+                        neuroshell_set_depth(local_item_id_text_id, 60.0);
+                        
+                        // Make sure text is visible
+                        neuroshell_set_visible(local_item_id_text_id, true);
+                        
+                        print("Target item ID text created successfully! ID=");
+                        print(local_item_id_text_id);
+                        print("\n");
+                        
+                        // Create third text element below item name to display distance
+                        // Position it below the item name text
+                        // item_id_text_y is at text_y + 13.0
+                        // Distance text should be below item name: item_id_text_y + 8 (char height) + 5 (margin) = item_id_text_y + 13
+                        let distance_text_x: f32 = panel_x + 5.0;
+                        let distance_text_y: f32 = item_id_text_y + 13.0;  // Below item name text (8px char height + 5px margin)
+                        let distance_text: string = "--- m";  // Default text
+                        print("Creating distance text at (");
+                        print(distance_text_x);
+                        print(", ");
+                        print(distance_text_y);
+                        print(")\n");
+                        local_distance_text_id = neuroshell_create_text(distance_text_x, distance_text_y, distance_text, font_id, 8.0, 8.0);
+                        
+                        if (local_distance_text_id != 0) {
+                            // Set text color to white
+                            neuroshell_set_color(local_distance_text_id, 1.0, 1.0, 1.0, 1.0);
+                            
+                            // Set depth higher than panel so text renders on top
+                            neuroshell_set_depth(local_distance_text_id, 60.0);
+                            
+                            // Make sure text is visible
+                            neuroshell_set_visible(local_distance_text_id, true);
+                            
+                            print("Target distance text created successfully! ID=");
+                            print(local_distance_text_id);
+                            print("\n");
+                        } else {
+                            print("WARNING: Failed to create target distance text!\n");
+                        }
+                    } else {
+                        print("WARNING: Failed to create target item ID text!\n");
+                    }
+                    
+                    // Assign to top-level variables so they're accessible in the main loop
+                    // These assignments happen inside the if block, but variables are declared at function scope
+                    target_text_id = local_target_text_id;
+                    if (local_item_id_text_id != 0) {
+                        target_item_id_text_id = local_item_id_text_id;
+                    }
+                    if (local_distance_text_id != 0) {
+                        target_distance_text_id = local_distance_text_id;
+                    }
+                } else {
+                    print("WARNING: Failed to create TARGET text!\n");
+                }
+            } else {
+                print("WARNING: Failed to create TARGET panel!\n");
+            }
+        }
     }
     
     // Initialize camera state
@@ -115,11 +304,43 @@ fn main(): void {
     let camera_speed: f32 = 5.0;            // Movement speed
     let camera_mouse_sensitivity: f32 = 0.1; // Mouse sensitivity
     
+    // Player physics (jump and gravity)
+    let player_velocity_y: f32 = 0.0;       // Vertical velocity (positive = up, negative = down)
+    let player_gravity: f32 = 20.0;         // Gravity acceleration (units/sec²)
+    let player_jump_velocity: f32 = 7.0;    // Initial jump velocity (units/sec) - gives ~1.2 units height
+    let player_height: f32 = 1.0;           // Player height (for ground collision detection)
+    let space_key_was_pressed: i32 = 0;     // Track spacebar state for edge detection (jump)
+    
+    // Vehicle movement state (AUTOMATIC MOVEMENT DISABLED - vehicle only moves when piloted)
+    // Old variables kept for reference but no longer used
+    let vehicle_move_timer: f32 = 0.0;      // Timer for vehicle movement pattern (DISABLED)
+    let vehicle_move_phase: i32 = 0;        // Current phase of movement (DISABLED)
+    let vehicle_move_distance: f32 = 0.0;   // Distance moved in current phase (DISABLED)
+    let vehicle_phase_distance: f32 = 20.0; // Distance to move in each phase (DISABLED)
+    let vehicle_speed: f32 = 5.0;           // Vehicle movement speed (DISABLED - only pilot mode moves vehicle)
+    
+    // Pilot mode state
+    let pilot_mode: i32 = 0;                // 0 = not in pilot mode, 1 = in pilot mode
+    let vehicle_yaw: f32 = 0.0;             // Vehicle's facing direction (in degrees, 0 = +Z forward)
+    let vehicle_prev_yaw: f32 = 0.0;        // Previous frame's vehicle yaw (to track rotation)
+    let vehicle_pilot_speed: f32 = 5.0;     // Vehicle speed when piloted
+    let vehicle_turn_speed: f32 = 90.0;     // Vehicle turn speed (degrees per second)
+    let e_key_was_pressed: i32 = 0;         // Track E key state for edge detection (toggle pilot mode)
+    
+    // Targeting system state (target_text_id and target_item_id_text_id declared earlier with Neuroshell init)
+    let current_target_index: i32 = -1;     // Current index in sorted target list (-1 = no target)
+    let t_key_was_pressed: i32 = 0;         // Track T key state for edge detection (target cycle)
+    
+    // Player's locked offset on vehicle (used in pilot mode to prevent strafing)
+    let locked_vehicle_offset_x: f32 = 0.0;  // Locked X offset when in pilot mode
+    let locked_vehicle_offset_z: f32 = 0.0;  // Locked Z offset when in pilot mode
+    let locked_vehicle_offset_y: f32 = 0.0;  // Locked Y offset when in pilot mode
+    
     // Pickup system state
     let selected_cube_index: i32 = -1;      // -1 = no selection, 0-8 = cube index
     let picked_up_cube_index: i32 = -1;     // -1 = nothing picked up, 0-8 = cube index
     let pickup_distance: f32 = 0.0;         // Distance from camera to cube when picked up (along forward direction)
-    let num_cubes: i32 = 14;                // Number of colored cubes (9 big + 5 small)
+    let num_cubes: i32 = 18;                // Number of colored cubes (9 big + 5 small + 1 rectangle + 1 pink block + 1 ground + 1 building)
     let last_selected_cube: i32 = -1;       // Track last selected cube for debug output and color changes
     let frame_count: i32 = 0;               // Frame counter for debug output
     
@@ -139,8 +360,16 @@ fn main(): void {
     print("  S - Move backward\n");
     print("  A - Strafe left\n");
     print("  D - Strafe right\n");
+    print("  SPACE - Jump (when on ground)\n");
     print("  Mouse - Look around\n");
-    print("  SPACE - Pick up/drop cube (aim at cube with crosshair)\n");
+    print("  1-9 - Set speed (1=5.0, 2=10.0, 3=15.0, ..., 9=45.0 units/sec)\n");
+    print("  LEFT CTRL - Pick up/drop cube (aim at cube with crosshair)\n");
+    print("  E - Toggle pilot mode (when within 2 meters of helm)\n");
+    print("  In pilot mode:\n");
+    print("    W/S - Move forward/backward\n");
+    print("    A/D - Turn left/right\n");
+    print("    SPACE - Move up\n");
+    print("    LEFT SHIFT - Move down\n");
     print("  ESC - Exit\n");
     print("\n");
     
@@ -200,8 +429,41 @@ fn main(): void {
         let yaw_rad: f32 = heidic_convert_degrees_to_radians(camera_yaw);
         let pitch_rad: f32 = heidic_convert_degrees_to_radians(camera_pitch);
         
+        // Check if player is on top of the blue rectangle (vehicle, index 14)
+        let rect_pos: Vec3 = heidic_get_cube_position(14);
+        let rect_size_xyz: Vec3 = heidic_get_cube_size_xyz(14);
+        let rect_top: f32 = rect_pos.y + (rect_size_xyz.y / 2.0);
+        let rect_min_x: f32 = rect_pos.x - (rect_size_xyz.x / 2.0);
+        let rect_max_x: f32 = rect_pos.x + (rect_size_xyz.x / 2.0);
+        let rect_min_z: f32 = rect_pos.z - (rect_size_xyz.z / 2.0);
+        let rect_max_z: f32 = rect_pos.z + (rect_size_xyz.z / 2.0);
+        
+        // Check if camera is on top of rectangle (within X/Z bounds and above top)
+        let is_on_vehicle: i32 = 0;
+        if camera_pos.x >= rect_min_x && camera_pos.x <= rect_max_x &&
+           camera_pos.z >= rect_min_z && camera_pos.z <= rect_max_z &&
+           camera_pos.y >= rect_top {
+            is_on_vehicle = 1;
+        }
+        
+        // Calculate player's relative position on vehicle (offset from vehicle center)
+        // IMPORTANT: Only calculate when NOT in pilot mode (in pilot mode, we use locked offset values)
+        // This prevents unnecessary recalculation and potential interference with locked offset system
+        let vehicle_offset_x: f32 = 0.0;
+        let vehicle_offset_z: f32 = 0.0;
+        let vehicle_offset_y: f32 = 0.0;
+        
+        if pilot_mode == 0 {
+            vehicle_offset_x = camera_pos.x - rect_pos.x;
+            vehicle_offset_z = camera_pos.z - rect_pos.z;
+            vehicle_offset_y = camera_pos.y - rect_top;  // Height above vehicle top
+        }
+        
+        // In pilot mode, the offset values above are NOT used - we use locked_vehicle_offset_* instead
+        // This ensures the player can't strafe - their position is locked to the vehicle
+        
+        // Always calculate forward and right based on camera yaw (where player is looking)
         // Forward vector for movement (horizontal only, based on yaw, ignores pitch)
-        // This ensures W/S only moves forward/backward horizontally, not up/down
         let forward: Vec3 = Vec3(
             heidic_sin(yaw_rad),
             0.0,  // No vertical component - movement is always horizontal
@@ -231,46 +493,507 @@ fn main(): void {
             right.z = right.z / right_len;
         }
         
+        // Check if player is near helm (pink block, index 15) - within 2 meters
+        let helm_pos: Vec3 = heidic_get_cube_position(15);
+        let dx_to_helm: f32 = camera_pos.x - helm_pos.x;
+        let dy_to_helm: f32 = camera_pos.y - helm_pos.y;
+        let dz_to_helm: f32 = camera_pos.z - helm_pos.z;
+        let dist_to_helm: f32 = heidic_sqrt(dx_to_helm * dx_to_helm + dy_to_helm * dy_to_helm + dz_to_helm * dz_to_helm);
+        let near_helm: i32 = 0;
+        if dist_to_helm <= 2.0 {
+            near_helm = 1;
+        }
+        
+        // Handle E key to toggle pilot mode (when within 2 meters of helm)
+        let e_key_pressed: i32 = glfwGetKey(window, 69);  // GLFW_KEY_E = 69
+        if e_key_pressed == 1 && e_key_was_pressed == 0 {
+            // E key just pressed (edge trigger)
+            if near_helm == 1 {
+                // Toggle pilot mode
+                if pilot_mode == 0 {
+                    // Enter pilot mode
+                    pilot_mode = 1;
+                    // Initialize previous yaw to current yaw to prevent incorrect delta on first frame
+                    vehicle_prev_yaw = vehicle_yaw;
+                    // Lock the player's offset on the vehicle to prevent strafing
+                    // Calculate current WORLD offset first
+                    let rect_pos: Vec3 = heidic_get_cube_position(14);
+                    let rect_size_xyz: Vec3 = heidic_get_cube_size_xyz(14);
+                    let rect_top: f32 = rect_pos.y + (rect_size_xyz.y / 2.0);
+                    let world_offset_x: f32 = camera_pos.x - rect_pos.x;
+                    let world_offset_z: f32 = camera_pos.z - rect_pos.z;
+                    locked_vehicle_offset_y = camera_pos.y - rect_top;
+                    
+                    // Convert world offset to vehicle-LOCAL offset
+                    // This is the INVERSE rotation: rotate by -vehicle_yaw
+                    // local_x = world_x * cos(yaw) - world_z * sin(yaw)  (note: cos(-θ)=cos(θ), sin(-θ)=-sin(θ))
+                    // local_z = world_x * sin(yaw) + world_z * cos(yaw)
+                    let yaw_rad: f32 = vehicle_yaw * 0.0174532925;
+                    locked_vehicle_offset_x = world_offset_x * heidic_cos(yaw_rad) - world_offset_z * heidic_sin(yaw_rad);
+                    locked_vehicle_offset_z = world_offset_x * heidic_sin(yaw_rad) + world_offset_z * heidic_cos(yaw_rad);
+                    
+                    if frame_count < 100 {
+                        print("[PILOT] Entered pilot mode (press E again to exit)\n");
+                    }
+                } else {
+                    // Exit pilot mode
+                    pilot_mode = 0;
+                    if frame_count < 100 {
+                        print("[PILOT] Exited pilot mode\n");
+                    }
+                }
+            }
+        }
+        e_key_was_pressed = e_key_pressed;
+        
+        // Handle number keys (1-9) for speed control
+        // 1 = 5.0 units/sec, 2 = 10.0, 3 = 15.0, ..., 9 = 45.0
+        if glfwGetKey(window, 49) == 1 {  // GLFW_KEY_1 = 49
+            camera_speed = 5.0;
+            vehicle_pilot_speed = 5.0;
+        }
+        if glfwGetKey(window, 50) == 1 {  // GLFW_KEY_2 = 50
+            camera_speed = 10.0;
+            vehicle_pilot_speed = 10.0;
+        }
+        if glfwGetKey(window, 51) == 1 {  // GLFW_KEY_3 = 51
+            camera_speed = 15.0;
+            vehicle_pilot_speed = 15.0;
+        }
+        if glfwGetKey(window, 52) == 1 {  // GLFW_KEY_4 = 52
+            camera_speed = 20.0;
+            vehicle_pilot_speed = 20.0;
+        }
+        if glfwGetKey(window, 53) == 1 {  // GLFW_KEY_5 = 53
+            camera_speed = 25.0;
+            vehicle_pilot_speed = 25.0;
+        }
+        if glfwGetKey(window, 54) == 1 {  // GLFW_KEY_6 = 54
+            camera_speed = 30.0;
+            vehicle_pilot_speed = 30.0;
+        }
+        if glfwGetKey(window, 55) == 1 {  // GLFW_KEY_7 = 55
+            camera_speed = 35.0;
+            vehicle_pilot_speed = 35.0;
+        }
+        if glfwGetKey(window, 56) == 1 {  // GLFW_KEY_8 = 56
+            camera_speed = 40.0;
+            vehicle_pilot_speed = 40.0;
+        }
+        if glfwGetKey(window, 57) == 1 {  // GLFW_KEY_9 = 57
+            camera_speed = 45.0;
+            vehicle_pilot_speed = 45.0;
+        }
+        
         // Handle keyboard input for movement
         let velocity: Vec3 = Vec3(0.0, 0.0, 0.0);
         
-        // W - Move forward
-        if glfwGetKey(window, 87) == 1 {  // GLFW_KEY_W
-            velocity.x = velocity.x + forward.x * camera_speed * delta_time;
-            velocity.y = velocity.y + forward.y * camera_speed * delta_time;
-            velocity.z = velocity.z + forward.z * camera_speed * delta_time;
+        // WASD keys are used for piloting when in pilot mode, normal movement when not
+        if pilot_mode == 0 {
+            // Normal movement (WASD) - only when not in pilot mode
+            // W - Move forward
+            if glfwGetKey(window, 87) == 1 {  // GLFW_KEY_W
+                velocity.x = velocity.x + forward.x * camera_speed * delta_time;
+                velocity.y = velocity.y + forward.y * camera_speed * delta_time;
+                velocity.z = velocity.z + forward.z * camera_speed * delta_time;
+            }
+            
+            // S - Move backward
+            if glfwGetKey(window, 83) == 1 {  // GLFW_KEY_S
+                velocity.x = velocity.x - forward.x * camera_speed * delta_time;
+                velocity.y = velocity.y - forward.y * camera_speed * delta_time;
+                velocity.z = velocity.z - forward.z * camera_speed * delta_time;
+            }
+            
+            // A - Strafe left
+            if glfwGetKey(window, 65) == 1 {  // GLFW_KEY_A
+                velocity.x = velocity.x - right.x * camera_speed * delta_time;
+                velocity.y = velocity.y - right.y * camera_speed * delta_time;
+                velocity.z = velocity.z - right.z * camera_speed * delta_time;
+            }
+            
+            // D - Strafe right
+            if glfwGetKey(window, 68) == 1 {  // GLFW_KEY_D
+                velocity.x = velocity.x + right.x * camera_speed * delta_time;
+                velocity.y = velocity.y + right.y * camera_speed * delta_time;
+                velocity.z = velocity.z + right.z * camera_speed * delta_time;
+            }
         }
         
-        // S - Move backward
-        if glfwGetKey(window, 83) == 1 {  // GLFW_KEY_S
-            velocity.x = velocity.x - forward.x * camera_speed * delta_time;
-            velocity.y = velocity.y - forward.y * camera_speed * delta_time;
-            velocity.z = velocity.z - forward.z * camera_speed * delta_time;
+        // Player physics: Jump and gravity (only when not in pilot mode)
+        if pilot_mode == 0 {
+            // Check if player is on ground using downward raycast
+            // Check both floor and cubes to find the closest ground surface
+            let floor_distance: f32 = heidic_raycast_downward_distance(camera_pos.x, camera_pos.y, camera_pos.z);
+            
+            // Check for cubes below the player
+            let cube_below_index: i32 = heidic_raycast_downward_big_cube(camera_pos.x, camera_pos.y, camera_pos.z);
+            let cube_distance: f32 = -1.0;
+            if cube_below_index >= 0 {
+                // Calculate distance to top of cube
+                let cube_pos: Vec3 = heidic_get_cube_position(cube_below_index);
+                let cube_size: f32 = heidic_get_cube_size(cube_below_index);
+                let cube_top_y: f32 = cube_pos.y + (cube_size / 2.0);
+                cube_distance = camera_pos.y - cube_top_y;
+            }
+            
+            // Check for vehicle (index 14) below the player - treat it as ground surface
+            let vehicle_distance: f32 = -1.0;
+            let vehicle_pos: Vec3 = heidic_get_cube_position(14);
+            let vehicle_size_xyz: Vec3 = heidic_get_cube_size_xyz(14);
+            // Check if player is above the vehicle (within X and Z bounds)
+            let vehicle_half_x: f32 = vehicle_size_xyz.x / 2.0;
+            let vehicle_half_z: f32 = vehicle_size_xyz.z / 2.0;
+            let vehicle_top_y: f32 = vehicle_pos.y + (vehicle_size_xyz.y / 2.0);
+            if camera_pos.x >= vehicle_pos.x - vehicle_half_x && camera_pos.x <= vehicle_pos.x + vehicle_half_x &&
+               camera_pos.z >= vehicle_pos.z - vehicle_half_z && camera_pos.z <= vehicle_pos.z + vehicle_half_z &&
+               camera_pos.y > vehicle_top_y {
+                // Player is above the vehicle, calculate distance to top
+                vehicle_distance = camera_pos.y - vehicle_top_y;
+            }
+            
+            // Use the closest ground surface (floor, cube, or vehicle)
+            let ground_distance: f32 = -1.0;
+            // Find the minimum valid distance
+            if floor_distance >= 0.0 {
+                ground_distance = floor_distance;
+            }
+            if cube_distance >= 0.0 {
+                if ground_distance < 0.0 || cube_distance < ground_distance {
+                    ground_distance = cube_distance;
+                }
+            }
+            if vehicle_distance >= 0.0 {
+                if ground_distance < 0.0 || vehicle_distance < ground_distance {
+                    ground_distance = vehicle_distance;
+                }
+            }
+            
+            let is_on_ground: i32 = 0;
+            
+            // Player is on ground if the distance to ground is approximately player_height
+            // ground_distance is the distance from camera to ground
+            // If feet are on ground, camera is at (ground_y + player_height), so distance = player_height
+            // Use a small tolerance (0.25) to account for floating point precision
+            if ground_distance >= 0.0 {
+                // Check if the distance is close to player_height (meaning feet are on ground)
+                let distance_to_feet: f32 = ground_distance - player_height;
+                if distance_to_feet >= -0.25 && distance_to_feet <= 0.25 {
+                    is_on_ground = 1;
+                }
+            }
+            
+            // Handle jump (spacebar) - only when on ground
+            let space_key_pressed: i32 = glfwGetKey(window, 32);  // GLFW_KEY_SPACE = 32
+            if space_key_pressed == 1 && space_key_was_pressed == 0 {
+                // Spacebar just pressed (edge trigger)
+                if is_on_ground == 1 {
+                    // Jump!
+                    player_velocity_y = player_jump_velocity;
+                    if frame_count < 100 {
+                        print("[PLAYER] Jump!\n");
+                    }
+                } else {
+                    // Debug: why can't we jump?
+                    if frame_count < 100 {
+                        print("[PLAYER] Spacebar pressed but not on ground. ground_distance=");
+                        print(ground_distance);
+                        print(", is_on_ground=");
+                        print(is_on_ground);
+                        print("\n");
+                    }
+                }
+            }
+            space_key_was_pressed = space_key_pressed;
+            
+            // Apply gravity to vertical velocity (only when not on ground)
+            if is_on_ground == 0 {
+                player_velocity_y = player_velocity_y - player_gravity * delta_time;
+            } else {
+                // Reset velocity when on ground (prevent accumulating downward velocity)
+                if player_velocity_y < 0.0 {
+                    player_velocity_y = 0.0;
+                }
+            }
+            
+            // Update camera Y position based on vertical velocity
+            camera_pos.y = camera_pos.y + player_velocity_y * delta_time;
+            
+            // Check for ground collision after movement (check both floor and cubes again)
+            let new_floor_distance: f32 = heidic_raycast_downward_distance(camera_pos.x, camera_pos.y, camera_pos.z);
+            
+            // Check for cubes below the player after movement
+            let new_cube_below_index: i32 = heidic_raycast_downward_big_cube(camera_pos.x, camera_pos.y, camera_pos.z);
+            let new_cube_distance: f32 = -1.0;
+            if new_cube_below_index >= 0 {
+                // Calculate distance to top of cube
+                let new_cube_pos: Vec3 = heidic_get_cube_position(new_cube_below_index);
+                let new_cube_size: f32 = heidic_get_cube_size(new_cube_below_index);
+                let new_cube_top_y: f32 = new_cube_pos.y + (new_cube_size / 2.0);
+                new_cube_distance = camera_pos.y - new_cube_top_y;
+            }
+            
+            // Check for vehicle below the player after movement
+            let new_vehicle_pos: Vec3 = heidic_get_cube_position(14);
+            let new_vehicle_size_xyz: Vec3 = heidic_get_cube_size_xyz(14);
+            let new_vehicle_distance: f32 = -1.0;
+            let new_vehicle_half_x: f32 = new_vehicle_size_xyz.x / 2.0;
+            let new_vehicle_half_z: f32 = new_vehicle_size_xyz.z / 2.0;
+            let new_vehicle_top_y: f32 = new_vehicle_pos.y + (new_vehicle_size_xyz.y / 2.0);
+            if camera_pos.x >= new_vehicle_pos.x - new_vehicle_half_x && camera_pos.x <= new_vehicle_pos.x + new_vehicle_half_x &&
+               camera_pos.z >= new_vehicle_pos.z - new_vehicle_half_z && camera_pos.z <= new_vehicle_pos.z + new_vehicle_half_z &&
+               camera_pos.y > new_vehicle_top_y {
+                // Player is above the vehicle, calculate distance to top
+                new_vehicle_distance = camera_pos.y - new_vehicle_top_y;
+            }
+            
+            // Use the closest ground surface after movement (floor, cube, or vehicle)
+            let new_ground_distance: f32 = -1.0;
+            // Find the minimum valid distance
+            if new_floor_distance >= 0.0 {
+                new_ground_distance = new_floor_distance;
+            }
+            if new_cube_distance >= 0.0 {
+                if new_ground_distance < 0.0 || new_cube_distance < new_ground_distance {
+                    new_ground_distance = new_cube_distance;
+                }
+            }
+            if new_vehicle_distance >= 0.0 {
+                if new_ground_distance < 0.0 || new_vehicle_distance < new_ground_distance {
+                    new_ground_distance = new_vehicle_distance;
+                }
+            }
+            
+            // If we hit the ground (distance is less than player height), snap to ground
+            if new_ground_distance >= 0.0 && new_ground_distance < player_height {
+                // Calculate ground Y position
+                let new_ground_y: f32 = camera_pos.y - new_ground_distance;
+                // Place player on top of ground (at ground Y + player height)
+                camera_pos.y = new_ground_y + player_height;
+                // Reset vertical velocity if we're falling down
+                if player_velocity_y < 0.0 {
+                    player_velocity_y = 0.0;
+                }
+            }
+            
+            // Update horizontal movement (X and Z)
+            let new_camera_x: f32 = camera_pos.x + velocity.x;
+            let new_camera_z: f32 = camera_pos.z + velocity.z;
+            
+            // Check for horizontal collision with vehicle (prevent walking through it)
+            // Allow movement on top of vehicle, but prevent walking through sides
+            let col_vehicle_pos: Vec3 = heidic_get_cube_position(14);
+            let col_vehicle_size: Vec3 = heidic_get_cube_size_xyz(14);
+            let col_half_x: f32 = col_vehicle_size.x / 2.0;
+            let col_half_z: f32 = col_vehicle_size.z / 2.0;
+            let col_bottom_y: f32 = col_vehicle_pos.y - (col_vehicle_size.y / 2.0);
+            let col_top_y: f32 = col_vehicle_pos.y + (col_vehicle_size.y / 2.0);
+            
+            // Check if new position would be inside vehicle bounds (horizontally)
+            let would_be_inside_xz: i32 = 0;
+            if new_camera_x >= col_vehicle_pos.x - col_half_x && new_camera_x <= col_vehicle_pos.x + col_half_x &&
+               new_camera_z >= col_vehicle_pos.z - col_half_z && new_camera_z <= col_vehicle_pos.z + col_half_z {
+                would_be_inside_xz = 1;
+            }
+            
+            // Only prevent collision if player is NOT on top of vehicle
+            // Player is on top if they're above the vehicle top and within XZ bounds
+            let is_on_top_of_vehicle: i32 = 0;
+            if would_be_inside_xz == 1 && camera_pos.y > col_top_y {
+                is_on_top_of_vehicle = 1;
+            }
+            
+            // If player would be inside vehicle bounds and NOT on top, prevent collision
+            if would_be_inside_xz == 1 && is_on_top_of_vehicle == 0 &&
+               camera_pos.y >= col_bottom_y && camera_pos.y <= col_top_y {
+                // Player would collide with vehicle sides, push back to edge
+                // Find closest edge and push player there
+                let dx_left: f32 = new_camera_x - (col_vehicle_pos.x - col_half_x);
+                let dx_right: f32 = (col_vehicle_pos.x + col_half_x) - new_camera_x;
+                let dz_front: f32 = new_camera_z - (col_vehicle_pos.z - col_half_z);
+                let dz_back: f32 = (col_vehicle_pos.z + col_half_z) - new_camera_z;
+                
+                // Push to closest edge (smallest distance)
+                if dx_left < dx_right && dx_left < dz_front && dx_left < dz_back {
+                    new_camera_x = col_vehicle_pos.x - col_half_x;
+                } else {
+                    if dx_right < dz_front && dx_right < dz_back {
+                        new_camera_x = col_vehicle_pos.x + col_half_x;
+                    } else {
+                        if dz_front < dz_back {
+                            new_camera_z = col_vehicle_pos.z - col_half_z;
+                        } else {
+                            new_camera_z = col_vehicle_pos.z + col_half_z;
+                        }
+                    }
+                }
+            }
+            
+            camera_pos.x = new_camera_x;
+            camera_pos.z = new_camera_z;
+            
+            // Update relative offset if player moved while on vehicle (only when not in pilot mode)
+            // In pilot mode, we don't update the offset here - it's handled in the pilot mode section
+            // This prevents the player from strafing when the vehicle rotates
+            if is_on_vehicle == 1 {
+                let updated_rect_pos: Vec3 = heidic_get_cube_position(14);
+                vehicle_offset_x = camera_pos.x - updated_rect_pos.x;
+                vehicle_offset_z = camera_pos.z - updated_rect_pos.z;
+            }
         }
         
-        // A - Strafe left
-        if glfwGetKey(window, 65) == 1 {  // GLFW_KEY_A
-            velocity.x = velocity.x - right.x * camera_speed * delta_time;
-            velocity.y = velocity.y - right.y * camera_speed * delta_time;
-            velocity.z = velocity.z - right.z * camera_speed * delta_time;
+        // Handle pilot mode controls (WASD keys remapped for piloting)
+        if pilot_mode == 1 {
+            // Get vehicle position
+            let current_rect_pos: Vec3 = heidic_get_cube_position(14);
+            let rect_size_xyz: Vec3 = heidic_get_cube_size_xyz(14);
+            let vehicle_move_delta: Vec3 = Vec3(0.0, 0.0, 0.0);
+            
+            // Convert vehicle yaw to radians (always update, even if just rotating)
+            let vehicle_yaw_rad: f32 = vehicle_yaw * 0.0174532925;  // Convert to radians
+            
+            // W - Move forward in direction vehicle is facing (pink block side is front, which is +Z)
+            // Vehicle forward is +Z when yaw = 0, so we rotate based on vehicle_yaw
+            if glfwGetKey(window, 87) == 1 {  // GLFW_KEY_W
+                // Move forward in vehicle's facing direction
+                let forward_x: f32 = heidic_sin(vehicle_yaw_rad);
+                let forward_z: f32 = heidic_cos(vehicle_yaw_rad);
+                let move_amount: f32 = vehicle_pilot_speed * delta_time;
+                vehicle_move_delta.x = forward_x * move_amount;
+                vehicle_move_delta.z = forward_z * move_amount;
+            }
+            
+            // A - Turn vehicle left (increase yaw, CCW turn) - ONLY rotate vehicle around Y axis, no player strafing
+            if glfwGetKey(window, 65) == 1 {  // GLFW_KEY_A
+                vehicle_yaw = vehicle_yaw + vehicle_turn_speed * delta_time;
+                // Ensure vehicle_yaw stays in valid range (0-360)
+                if vehicle_yaw >= 360.0 {
+                    vehicle_yaw = vehicle_yaw - 360.0;
+                }
+            }
+            
+            // D - Turn vehicle right (decrease yaw, CW turn) - ONLY rotate vehicle around Y axis, no player strafing
+            if glfwGetKey(window, 68) == 1 {  // GLFW_KEY_D
+                vehicle_yaw = vehicle_yaw - vehicle_turn_speed * delta_time;
+                // Ensure vehicle_yaw stays in valid range (0-360)
+                if vehicle_yaw < 0.0 {
+                    vehicle_yaw = vehicle_yaw + 360.0;
+                }
+            }
+            
+            // S - Move backward (optional, can be used for reverse)
+            if glfwGetKey(window, 83) == 1 {  // GLFW_KEY_S
+                // Move backward in vehicle's facing direction
+                let forward_x: f32 = heidic_sin(vehicle_yaw_rad);
+                let forward_z: f32 = heidic_cos(vehicle_yaw_rad);
+                let move_amount: f32 = vehicle_pilot_speed * delta_time;
+                vehicle_move_delta.x = vehicle_move_delta.x - forward_x * move_amount;
+                vehicle_move_delta.z = vehicle_move_delta.z - forward_z * move_amount;
+            }
+            
+            // SPACE - Move straight up (vertical movement)
+            if glfwGetKey(window, 32) == 1 {  // GLFW_KEY_SPACE = 32
+                let move_amount: f32 = vehicle_pilot_speed * delta_time;
+                vehicle_move_delta.y = vehicle_move_delta.y + move_amount;  // Move up (+Y)
+            }
+            
+            // LEFT SHIFT - Move straight down (vertical movement)
+            if glfwGetKey(window, 340) == 1 {  // GLFW_KEY_LEFT_SHIFT = 340
+                let move_amount: f32 = vehicle_pilot_speed * delta_time;
+                vehicle_move_delta.y = vehicle_move_delta.y - move_amount;  // Move down (-Y)
+            }
+            
+            // Update vehicle position (ONLY in pilot mode)
+            let new_rect_x: f32 = current_rect_pos.x + vehicle_move_delta.x;
+            let new_rect_y: f32 = current_rect_pos.y + vehicle_move_delta.y;
+            let new_rect_z: f32 = current_rect_pos.z + vehicle_move_delta.z;
+            
+            heidic_set_cube_position(14, new_rect_x, new_rect_y, new_rect_z);
+            
+            // Set vehicle visual rotation (makes the rectangle actually rotate visually)
+            heidic_set_cube_rotation(14, vehicle_yaw);
+            
+            // Update all cubes attached to the vehicle (they move and rotate with it)
+            heidic_update_attached_cubes(new_rect_x, new_rect_y, new_rect_z, vehicle_yaw, rect_size_xyz.y);
+            
+            // Update pink block position to stay on vehicle at front (short end)
+            // The pink block is like a helm/control panel - it should always be at the front of the vehicle
+            // When vehicle rotates, the block rotates with it to stay at the front
+            // When vehicle_yaw = 0, front is +Z. Rotate the offset by vehicle_yaw to keep block at front
+            let block_offset_z: f32 = (rect_size_xyz.z / 2.0) - 0.25;  // Distance from center to +Z edge - half block
+            let block_offset_x_rotated: f32 = block_offset_z * heidic_sin(vehicle_yaw_rad);
+            let block_offset_z_rotated: f32 = block_offset_z * heidic_cos(vehicle_yaw_rad);
+            let block_x: f32 = new_rect_x + block_offset_x_rotated;
+            let block_y: f32 = new_rect_y + (rect_size_xyz.y / 2.0) + 0.25;
+            let block_z: f32 = new_rect_z + block_offset_z_rotated;
+            heidic_set_cube_position(15, block_x, block_y, block_z);
+            
+            // Set helm rotation to match vehicle rotation (maintains relative orientation)
+            heidic_set_cube_rotation(15, vehicle_yaw);
+            
+            // Move player with the vehicle (maintain relative position)
+            // When vehicle rotates, player should rotate with it (maintain position in vehicle-local space)
+            // CRITICAL: Use locked offset to prevent strafing - player position is LOCKED to vehicle
+            // REMOVED is_on_vehicle check: In pilot mode, player is ALWAYS on vehicle (logically attached)
+            // The bounds check uses axis-aligned bounds which don't work with logical rotation
+            
+            // Use absolute yaw rotation (like the helm) instead of accumulating deltas
+            // This prevents floating-point error accumulation and ensures consistency
+            // The locked offset is in vehicle-local space (when yaw=0, +Z is forward)
+            // Rotate the locked offset by the absolute vehicle_yaw to get world-space position
+            // Standard 2D rotation matrix for Y-axis rotation (matches helm convention):
+            // x' = x*cos(θ) + z*sin(θ)
+            // z' = -x*sin(θ) + z*cos(θ)
+            // This matches the helm's formula when z=0 (helm only has Z offset)
+            let player_offset_x_rotated: f32 = locked_vehicle_offset_x * heidic_cos(vehicle_yaw_rad) + locked_vehicle_offset_z * heidic_sin(vehicle_yaw_rad);
+            let player_offset_z_rotated: f32 = -locked_vehicle_offset_x * heidic_sin(vehicle_yaw_rad) + locked_vehicle_offset_z * heidic_cos(vehicle_yaw_rad);
+            
+            // Update player position to maintain locked offset from vehicle center
+            // This is the ONLY place player position is updated in pilot mode
+            // Player cannot strafe because offset is locked and only rotates with vehicle
+            camera_pos.x = new_rect_x + player_offset_x_rotated;
+            camera_pos.y = new_rect_y + rect_size_xyz.y / 2.0 + locked_vehicle_offset_y;
+            camera_pos.z = new_rect_z + player_offset_z_rotated;
+            
+            // Update previous yaw for next frame (no longer needed for delta, but keep for consistency)
+            vehicle_prev_yaw = vehicle_yaw;
+            
+            // NOTE: Pilot mode can only be exited by pressing X key
+            // Walking off the side of the vehicle does NOT exit pilot mode
         }
         
-        // D - Strafe right
-        if glfwGetKey(window, 68) == 1 {  // GLFW_KEY_D
-            velocity.x = velocity.x + right.x * camera_speed * delta_time;
-            velocity.y = velocity.y + right.y * camera_speed * delta_time;
-            velocity.z = velocity.z + right.z * camera_speed * delta_time;
+        // Update pink block position when not in pilot mode (keep it attached to vehicle)
+        // Vehicle no longer moves automatically - only when piloted
+        // IMPORTANT: Use EXACT same calculation as pilot mode to maintain helm position
+        if pilot_mode == 0 {
+            let current_rect_pos: Vec3 = heidic_get_cube_position(14);
+            let rect_size_xyz: Vec3 = heidic_get_cube_size_xyz(14);
+            
+            // Maintain vehicle visual rotation even when not in pilot mode
+            // This ensures the vehicle and helm stay in their rotated state
+            heidic_set_cube_rotation(14, vehicle_yaw);
+            
+            // Use EXACT same calculation as pilot mode (lines 448-453)
+            // Convert vehicle yaw to radians (same as pilot mode uses vehicle_yaw_rad)
+            let vehicle_yaw_rad: f32 = vehicle_yaw * 0.0174532925;  // Convert to radians (same as line 387 in pilot mode)
+            // Calculate helm position at front of vehicle (same formula as pilot mode)
+            let block_offset_z: f32 = (rect_size_xyz.z / 2.0) - 0.25;  // Distance from center to +Z edge - half block
+            let block_offset_x_rotated: f32 = block_offset_z * heidic_sin(vehicle_yaw_rad);
+            let block_offset_z_rotated: f32 = block_offset_z * heidic_cos(vehicle_yaw_rad);
+            let block_x: f32 = current_rect_pos.x + block_offset_x_rotated;
+            let block_y: f32 = current_rect_pos.y + (rect_size_xyz.y / 2.0) + 0.25;
+            let block_z: f32 = current_rect_pos.z + block_offset_z_rotated;
+            heidic_set_cube_position(15, block_x, block_y, block_z);
+            
+            // Set helm rotation to match vehicle rotation (maintains relative orientation)
+            heidic_set_cube_rotation(15, vehicle_yaw);
+            
+            // Update all cubes attached to the vehicle (even when not in pilot mode)
+            heidic_update_attached_cubes(current_rect_pos.x, current_rect_pos.y, current_rect_pos.z, vehicle_yaw, rect_size_xyz.y);
         }
         
-        // Update camera position
-        camera_pos.x = camera_pos.x + velocity.x;
-        camera_pos.y = camera_pos.y + velocity.y;
-        camera_pos.z = camera_pos.z + velocity.z;
-        
-        // Keep camera above ground (simple ground plane at y=0)
-        if camera_pos.y < 0.5 {
-            camera_pos.y = 0.5;
-        }
+        // Ground collision is now handled by physics system above
+        // (jump and gravity system handles ground detection and collision)
         
         // Render scene with camera FIRST (this stores matrices for raycast)
         heidic_render_fps(window, camera_pos.x, camera_pos.y, camera_pos.z, camera_yaw, camera_pitch);
@@ -288,27 +1011,30 @@ fn main(): void {
         
         let cube_index: i32 = 0;
         while cube_index < num_cubes {
-            // Get cube position and size from C++ (returns Vec3)
-            let cube_pos: Vec3 = heidic_get_cube_position(cube_index);
-            let cube_size: f32 = heidic_get_cube_size(cube_index);
-            
-            // Cast ray from crosshair (screen center) to check if it hits this cube
-            let hit: i32 = heidic_raycast_cube_hit_center(window, cube_pos.x, cube_pos.y, cube_pos.z, cube_size, cube_size, cube_size);
-            
-            if hit == 1 {
-                // Get hit point to calculate distance
-                let hit_point: Vec3 = heidic_raycast_cube_hit_point_center(window, cube_pos.x, cube_pos.y, cube_pos.z, cube_size, cube_size, cube_size);
+            // Skip vehicle (14) and helm (15) - they cannot be selected or moved
+            if cube_index != 14 && cube_index != 15 {
+                // Get cube position and size from C++ (returns Vec3)
+                let cube_pos: Vec3 = heidic_get_cube_position(cube_index);
+                let cube_size_xyz: Vec3 = heidic_get_cube_size_xyz(cube_index);
                 
-                // Calculate distance from camera to hit point
-                let dx: f32 = hit_point.x - camera_pos.x;
-                let dy: f32 = hit_point.y - camera_pos.y;
-                let dz: f32 = hit_point.z - camera_pos.z;
-                let dist: f32 = heidic_sqrt(dx * dx + dy * dy + dz * dz);
+                // Cast ray from crosshair (screen center) to check if it hits this cube/rectangle
+                let hit: i32 = heidic_raycast_cube_hit_center(window, cube_pos.x, cube_pos.y, cube_pos.z, cube_size_xyz.x, cube_size_xyz.y, cube_size_xyz.z);
                 
-                // Track closest hit
-                if dist < closest_hit_distance {
-                    closest_hit_distance = dist;
-                    new_selected_cube = cube_index;
+                if hit == 1 {
+                    // Get hit point to calculate distance
+                    let hit_point: Vec3 = heidic_raycast_cube_hit_point_center(window, cube_pos.x, cube_pos.y, cube_pos.z, cube_size_xyz.x, cube_size_xyz.y, cube_size_xyz.z);
+                    
+                    // Calculate distance from camera to hit point
+                    let dx: f32 = hit_point.x - camera_pos.x;
+                    let dy: f32 = hit_point.y - camera_pos.y;
+                    let dz: f32 = hit_point.z - camera_pos.z;
+                    let dist: f32 = heidic_sqrt(dx * dx + dy * dy + dz * dz);
+                    
+                    // Track closest hit
+                    if dist < closest_hit_distance {
+                        closest_hit_distance = dist;
+                        new_selected_cube = cube_index;
+                    }
                 }
             }
             
@@ -322,6 +1048,11 @@ fn main(): void {
         } else {
             // Normal selection: use raycast result
             selected_cube_index = new_selected_cube;
+        }
+        
+        // Explicitly prevent vehicle (14) and helm (15) from being selected
+        if selected_cube_index == 14 || selected_cube_index == 15 {
+            selected_cube_index = -1;
         }
         
         // Debug: Print selection status when it changes (BEFORE visual feedback update)
@@ -338,25 +1069,190 @@ fn main(): void {
         }
         
         // Visual feedback: Change color of selected cube (bright white) and restore previous
+        // Skip highlighting for vehicle (14) and helm (15) - they cannot be moved
         if selected_cube_index != last_selected_cube {
-            // Restore previous cube's color
-            if last_selected_cube >= 0 {
+            // Restore previous cube's color (unless it's vehicle or helm)
+            if last_selected_cube >= 0 && last_selected_cube != 14 && last_selected_cube != 15 {
                 heidic_restore_cube_color(last_selected_cube);
             }
-            // Highlight new selected cube (bright white)
-            if selected_cube_index >= 0 {
+            // Highlight new selected cube (bright white) - unless it's vehicle or helm
+            if selected_cube_index >= 0 && selected_cube_index != 14 && selected_cube_index != 15 {
                 heidic_set_cube_color(selected_cube_index, 1.0, 1.0, 1.0);  // Bright white when selected
             }
             last_selected_cube = selected_cube_index;
         }
         
-        // Handle spacebar for pickup/drop (AFTER raycast, so we know what's selected)
-        let spacebar_pressed: i32 = glfwGetKey(window, 32);  // GLFW_KEY_SPACE = 32
+        // Handle left ctrl for pickup/drop (AFTER raycast, so we know what's selected)
+        let ctrl_pressed: i32 = glfwGetKey(window, 341);  // GLFW_KEY_LEFT_CONTROL = 341
+        // Handle T key for targeting system
+        let t_key_pressed: i32 = glfwGetKey(window, 84);  // GLFW_KEY_T = 84
+        if t_key_pressed == 1 && t_key_was_pressed == 0 {
+            // T key just pressed (edge trigger) - cycle through targets
+            // Find all cubes with item type IDs (non-zero), calculate distances, sort, and cycle
+            
+            // Collect all cubes with item type IDs and their distances
+            let target_count: i32 = 0;
+            let target_indices: [i32] = [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1];
+            let target_distances: [f32] = [999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0];
+            
+            let cube_index: i32 = 0;
+            while cube_index < num_cubes {
+                let item_type_id: i32 = heidic_get_item_type_id(cube_index);
+                if item_type_id > 0 {
+                    // This cube has an item type ID, calculate distance
+                    let cube_pos: Vec3 = heidic_get_cube_position(cube_index);
+                    let dx: f32 = cube_pos.x - camera_pos.x;
+                    let dy: f32 = cube_pos.y - camera_pos.y;
+                    let dz: f32 = cube_pos.z - camera_pos.z;
+                    let distance: f32 = heidic_sqrt(dx * dx + dy * dy + dz * dz);
+                    
+                    // Store in arrays
+                    target_indices[target_count] = cube_index;
+                    target_distances[target_count] = distance;
+                    target_count = target_count + 1;
+                }
+                cube_index = cube_index + 1;
+            }
+            
+            // Simple bubble sort to sort by distance (closest first)
+            let i: i32 = 0;
+            while i < target_count - 1 {
+                let j: i32 = 0;
+                while j < target_count - 1 - i {
+                    if target_distances[j] > target_distances[j + 1] {
+                        // Swap distances
+                        let temp_dist: f32 = target_distances[j];
+                        target_distances[j] = target_distances[j + 1];
+                        target_distances[j + 1] = temp_dist;
+                        
+                        // Swap indices
+                        let temp_idx: i32 = target_indices[j];
+                        target_indices[j] = target_indices[j + 1];
+                        target_indices[j + 1] = temp_idx;
+                    }
+                    j = j + 1;
+                }
+                i = i + 1;
+            }
+            
+            // Debug: Print how many targets were found
+            print("[TARGET] Found ");
+            print(target_count);
+            print(" targets with item type IDs\n");
+            
+            // Cycle to next target
+            if target_count > 0 {
+                current_target_index = current_target_index + 1;
+                if current_target_index >= target_count {
+                    current_target_index = 0;  // Wrap around
+                }
+                
+                let selected_target_idx: i32 = target_indices[current_target_index];
+                let selected_item_name: string = heidic_get_item_name(selected_target_idx);
+                let selected_item_type_id: i32 = heidic_get_item_type_id(selected_target_idx);
+                let selected_distance: f32 = target_distances[current_target_index];
+                
+                print("[TARGET] Selected target index: ");
+                print(selected_target_idx);
+                print(", item name: ");
+                print(selected_item_name);
+                print(", item type ID: ");
+                print(selected_item_type_id);
+                print(", distance: ");
+                print(selected_distance);
+                print("\n");
+                
+                // Update target item ID text to show item name
+                if target_item_id_text_id != 0 {
+                    // Use the item name directly (if empty, C++ will return empty string)
+                    print("[TARGET] Updating text to item name: ");
+                    print(selected_item_name);
+                    print("\n");
+                    neuroshell_set_text_string(target_item_id_text_id, selected_item_name);
+                } else {
+                    print("[TARGET] WARNING: target_item_id_text_id is 0, cannot update text!\n");
+                }
+                
+                // Update distance text to show distance to target
+                if target_distance_text_id != 0 {
+                    // Format distance as "XXX.X m" using string interpolation
+                    let distance_text: string = "{selected_distance} m";
+                    print("[TARGET] Updating distance text to: ");
+                    print(distance_text);
+                    print("\n");
+                    neuroshell_set_text_string(target_distance_text_id, distance_text);
+                } else {
+                    print("[TARGET] WARNING: target_distance_text_id is 0, cannot update distance text!\n");
+                }
+            } else {
+                // No targets found
+                print("[TARGET] No targets found with item type IDs\n");
+                if target_item_id_text_id != 0 {
+                    neuroshell_set_text_string(target_item_id_text_id, "NONE");
+                } else {
+                    print("[TARGET] WARNING: target_item_id_text_id is 0, cannot set NONE!\n");
+                }
+                if target_distance_text_id != 0 {
+                    neuroshell_set_text_string(target_distance_text_id, "--- m");
+                }
+                current_target_index = -1;
+            }
+        }
+        t_key_was_pressed = t_key_pressed;
         
-        // Debug: Print spacebar state when picking up/dropping (first few frames only)
+        // Update distance to current target every frame (if there's a target)
+        if current_target_index >= 0 && target_distance_text_id != 0 {
+            // Recalculate distance to current target
+            let target_count: i32 = 0;
+            let target_indices: [i32] = [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1];
+            let target_distances: [f32] = [999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0, 999999.0];
+            
+            let cube_index: i32 = 0;
+            while cube_index < num_cubes {
+                let item_type_id: i32 = heidic_get_item_type_id(cube_index);
+                if item_type_id > 0 {
+                    let cube_pos: Vec3 = heidic_get_cube_position(cube_index);
+                    let dx: f32 = cube_pos.x - camera_pos.x;
+                    let dy: f32 = cube_pos.y - camera_pos.y;
+                    let dz: f32 = cube_pos.z - camera_pos.z;
+                    let distance: f32 = heidic_sqrt(dx * dx + dy * dy + dz * dz);
+                    target_indices[target_count] = cube_index;
+                    target_distances[target_count] = distance;
+                    target_count = target_count + 1;
+                }
+                cube_index = cube_index + 1;
+            }
+            
+            // Sort by distance (same as T key logic)
+            let i: i32 = 0;
+            while i < target_count - 1 {
+                let j: i32 = 0;
+                while j < target_count - 1 - i {
+                    if target_distances[j] > target_distances[j + 1] {
+                        let temp_dist: f32 = target_distances[j];
+                        target_distances[j] = target_distances[j + 1];
+                        target_distances[j + 1] = temp_dist;
+                        let temp_idx: i32 = target_indices[j];
+                        target_indices[j] = target_indices[j + 1];
+                        target_indices[j + 1] = temp_idx;
+                    }
+                    j = j + 1;
+                }
+                i = i + 1;
+            }
+            
+            // Update distance if we have a valid target
+            if current_target_index < target_count {
+                let current_distance: f32 = target_distances[current_target_index];
+                let distance_text: string = "{current_distance} m";
+                neuroshell_set_text_string(target_distance_text_id, distance_text);
+            }
+        }
+        
+        // Debug: Print ctrl state when picking up/dropping (first few frames only)
         if frame_count < 300 && picked_up_cube_index >= 0 {
-            print("[PICKUP] Spacebar state: ");
-            print(spacebar_pressed);
+            print("[PICKUP] Ctrl state: ");
+            print(ctrl_pressed);
             print(", picked_up_cube: ");
             print(picked_up_cube_index);
             print(", selected_cube: ");
@@ -364,11 +1260,18 @@ fn main(): void {
             print("\n");
         }
         
-        if spacebar_pressed == 1 {
-            // Spacebar is held
-            if selected_cube_index >= 0 && picked_up_cube_index < 0 {
+        if ctrl_pressed == 1 {
+            // Left Ctrl is held
+            // Don't allow picking up the rectangle (index 14) or pink block (index 15)
+            if selected_cube_index >= 0 && selected_cube_index != 14 && selected_cube_index != 15 && picked_up_cube_index < 0 {
                 // Just started picking up - calculate distance from camera to cube along forward direction
                 let cube_pos: Vec3 = heidic_get_cube_position(selected_cube_index);
+                
+                // If the cube is attached to the vehicle, detach it first
+                let is_attached: i32 = heidic_is_cube_attached(selected_cube_index);
+                if is_attached == 1 {
+                    heidic_detach_cube_from_vehicle(selected_cube_index);
+                }
                 
                 // Calculate forward direction from camera yaw and pitch
                 let yaw_rad: f32 = camera_yaw * 0.0174532925;  // Convert to radians
@@ -429,48 +1332,121 @@ fn main(): void {
                 heidic_set_cube_position(picked_up_cube_index, new_cube_x, new_cube_y, new_cube_z);
             }
         } else {
-            // Spacebar released - drop cube
+            // Left Ctrl released - drop cube
             if picked_up_cube_index >= 0 {
                 let dropped_cube_size: f32 = heidic_get_cube_size(picked_up_cube_index);
                 let dropped_cube_pos: Vec3 = heidic_get_cube_position(picked_up_cube_index);
                 
-                // If dropping a small cube, check if there's a big cube below it
-                if dropped_cube_size < 1.0 {
-                    // Cast ray downward to check for big cube
-                    // Cast from slightly above current position to avoid self-intersection
-                    let ray_start_y: f32 = dropped_cube_pos.y + 0.1;
-                    let big_cube_below: i32 = heidic_raycast_downward_big_cube(dropped_cube_pos.x, ray_start_y, dropped_cube_pos.z);
+                // Check if cube is being dropped on the vehicle (index 14)
+                let vehicle_pos: Vec3 = heidic_get_cube_position(14);
+                let vehicle_size: Vec3 = heidic_get_cube_size_xyz(14);
+                let vehicle_top: f32 = vehicle_pos.y + (vehicle_size.y / 2.0);
+                let vehicle_min_x: f32 = vehicle_pos.x - (vehicle_size.x / 2.0);
+                let vehicle_max_x: f32 = vehicle_pos.x + (vehicle_size.x / 2.0);
+                let vehicle_min_z: f32 = vehicle_pos.z - (vehicle_size.z / 2.0);
+                let vehicle_max_z: f32 = vehicle_pos.z + (vehicle_size.z / 2.0);
+                
+                // Check if cube is above and within vehicle bounds
+                let cube_half: f32 = dropped_cube_size / 2.0;
+                let cube_bottom: f32 = dropped_cube_pos.y - cube_half;
+                let on_vehicle: i32 = 0;
+                
+                // Use the rotated vehicle bounds check
+                // Since the vehicle can be rotated, we need to check in vehicle-local space
+                // Convert world offset to local offset
+                let vehicle_yaw_rad: f32 = vehicle_yaw * 0.0174532925;
+                let world_offset_x: f32 = dropped_cube_pos.x - vehicle_pos.x;
+                let world_offset_z: f32 = dropped_cube_pos.z - vehicle_pos.z;
+                
+                // Inverse rotation to get local offset
+                let local_offset_x: f32 = world_offset_x * heidic_cos(vehicle_yaw_rad) - world_offset_z * heidic_sin(vehicle_yaw_rad);
+                let local_offset_z: f32 = world_offset_x * heidic_sin(vehicle_yaw_rad) + world_offset_z * heidic_cos(vehicle_yaw_rad);
+                
+                // Check if within vehicle bounds in local space (with some tolerance)
+                let half_width: f32 = vehicle_size.x / 2.0;
+                let half_length: f32 = vehicle_size.z / 2.0;
+                let tolerance: f32 = 0.5;  // Allow slightly outside bounds for easier placement
+                
+                // Height check: cube must be above vehicle top (can be dropped from any height above)
+                // and within reasonable range below (in case vehicle moved up slightly)
+                let height_above_vehicle: f32 = cube_bottom - vehicle_top;
+                let within_bounds: i32 = 0;
+                if local_offset_x >= -(half_width + tolerance) && local_offset_x <= (half_width + tolerance) &&
+                   local_offset_z >= -(half_length + tolerance) && local_offset_z <= (half_length + tolerance) {
+                    within_bounds = 1;
+                }
+                
+                // Accept if within bounds and above vehicle (any height above, up to 5 units below)
+                if within_bounds == 1 && height_above_vehicle >= -1.0 && height_above_vehicle <= 10.0 {
+                    // Dropped on vehicle - attach it!
+                    on_vehicle = 1;
                     
-                    if big_cube_below >= 0 {
-                        // Snap small cube to center of big cube's top face IMMEDIATELY
-                        let big_cube_pos: Vec3 = heidic_get_cube_position(big_cube_below);
-                        let big_cube_size: f32 = heidic_get_cube_size(big_cube_below);
+                    // Snap to vehicle surface (place on top of vehicle)
+                    let snap_y: f32 = vehicle_top + cube_half;
+                    heidic_set_cube_position(picked_up_cube_index, dropped_cube_pos.x, snap_y, dropped_cube_pos.z);
+                    
+                    // local_y is height of cube center above vehicle top
+                    let final_local_y: f32 = cube_half;
+                    
+                    // Attach the cube to the vehicle
+                    heidic_attach_cube_to_vehicle(picked_up_cube_index, local_offset_x, final_local_y, local_offset_z);
+                    
+                    // Set cube rotation to match vehicle
+                    heidic_set_cube_rotation(picked_up_cube_index, vehicle_yaw);
+                    
+                    if frame_count < 300 {
+                        print("[ATTACH] Dropped cube ");
+                        print(picked_up_cube_index);
+                        print(" on vehicle, attached at local (");
+                        print(local_offset_x);
+                        print(", ");
+                        print(final_local_y);
+                        print(", ");
+                        print(local_offset_z);
+                        print(")\n");
+                    }
+                }
+                
+                // If not on vehicle, use existing logic
+                if on_vehicle == 0 {
+                    // If dropping a small cube, check if there's a big cube below it
+                    if dropped_cube_size < 1.0 {
+                        // Cast ray downward to check for big cube
+                        // Cast from slightly above current position to avoid self-intersection
+                        let ray_start_y: f32 = dropped_cube_pos.y + 0.1;
+                        let big_cube_below: i32 = heidic_raycast_downward_big_cube(dropped_cube_pos.x, ray_start_y, dropped_cube_pos.z);
                         
-                        // Big cube top is at: big_cube_pos.y + (big_cube_size / 2.0)
-                        // Small cube center should be at: big_cube_top + (small_cube_size / 2.0)
-                        let big_cube_top: f32 = big_cube_pos.y + (big_cube_size / 2.0);
-                        let small_cube_center_y: f32 = big_cube_top + (dropped_cube_size / 2.0);
-                        
-                        // Snap to center of big cube (X and Z match big cube center)
-                        heidic_set_cube_position(picked_up_cube_index, big_cube_pos.x, small_cube_center_y, big_cube_pos.z);
-                        
-                        if frame_count < 300 {
-                            print("[PICKUP] Snapped small cube to big cube ");
-                            print(big_cube_below);
-                            print("\n");
+                        if big_cube_below >= 0 {
+                            // Snap small cube to center of big cube's top face IMMEDIATELY
+                            let big_cube_pos: Vec3 = heidic_get_cube_position(big_cube_below);
+                            let big_cube_size: f32 = heidic_get_cube_size(big_cube_below);
+                            
+                            // Big cube top is at: big_cube_pos.y + (big_cube_size / 2.0)
+                            // Small cube center should be at: big_cube_top + (small_cube_size / 2.0)
+                            let big_cube_top: f32 = big_cube_pos.y + (big_cube_size / 2.0);
+                            let small_cube_center_y: f32 = big_cube_top + (dropped_cube_size / 2.0);
+                            
+                            // Snap to center of big cube (X and Z match big cube center)
+                            heidic_set_cube_position(picked_up_cube_index, big_cube_pos.x, small_cube_center_y, big_cube_pos.z);
+                            
+                            if frame_count < 300 {
+                                print("[PICKUP] Snapped small cube to big cube ");
+                                print(big_cube_below);
+                                print("\n");
+                            }
+                        } else {
+                            // No big cube below, will fall to floor via gravity
+                            if frame_count < 300 {
+                                print("[PICKUP] Dropped small cube, no big cube below - will fall to floor\n");
+                            }
                         }
                     } else {
-                        // No big cube below, will fall to floor via gravity
+                        // Big cube dropped, just let it fall normally
                         if frame_count < 300 {
-                            print("[PICKUP] Dropped small cube, no big cube below - will fall to floor\n");
+                            print("[PICKUP] Dropped big cube: ");
+                            print(picked_up_cube_index);
+                            print("\n");
                         }
-                    }
-                } else {
-                    // Big cube dropped, just let it fall normally
-                    if frame_count < 300 {
-                        print("[PICKUP] Dropped big cube: ");
-                        print(picked_up_cube_index);
-                        print("\n");
                     }
                 }
                 
@@ -479,9 +1455,9 @@ fn main(): void {
             }
         }
         
-        // Debug: Print if spacebar pressed but no cube selected
-        if spacebar_pressed == 1 && selected_cube_index < 0 && frame_count < 300 {
-            print("[PICKUP] Spacebar pressed but no cube selected\n");
+        // Debug: Print if ctrl pressed but no cube selected
+        if ctrl_pressed == 1 && selected_cube_index < 0 && frame_count < 300 {
+            print("[PICKUP] Ctrl pressed but no cube selected\n");
         }
         
         // ====================================================================
@@ -491,8 +1467,12 @@ fn main(): void {
         // OPTIMIZATION: Only check cubes that are above the floor (no raycast needed for cubes on ground)
         let gravity_cube_index: i32 = 0;
         while gravity_cube_index < num_cubes {
-            // Skip if this cube is currently picked up
-            if gravity_cube_index != picked_up_cube_index {
+            // Skip if this cube is currently picked up, or if it's the vehicle (index 14), pink block on vehicle (index 15),
+            // ground cube (index 16), or building (index 17) - these are static structures
+            // Vehicle should not be affected by gravity - it's controlled by pilot mode
+            // Also skip cubes that are attached to the vehicle
+            let is_cube_attached: i32 = heidic_is_cube_attached(gravity_cube_index);
+            if gravity_cube_index != picked_up_cube_index && gravity_cube_index != 14 && gravity_cube_index != 15 && gravity_cube_index != 16 && gravity_cube_index != 17 && is_cube_attached == 0 {
                 let cube_pos: Vec3 = heidic_get_cube_position(gravity_cube_index);
                 let cube_size: f32 = heidic_get_cube_size(gravity_cube_index);
                 let half_size: f32 = cube_size / 2.0;
